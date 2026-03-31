@@ -1,0 +1,24 @@
+En la carpeta backend 
+cd "C:\Users\Gonzalo\Desktop\TFG\Code\TFG\TFG\backend"
+
+Levantar el backend
+uvicorn backend:app --reload --host 0.0.0.0 --port 8000
+Si se queja de entorno virtual
+
+python -m venv venv
+
+venv\Scripts\activate
+
+
+
+
+En la carpeta TFG
+
+deno task start
+
+
+Si da error ps1 
+
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+deactivate para salir del venv
