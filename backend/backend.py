@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import ollama
-from db import users_collection, conversations_collection, messages_collection
+from db import users_collection, conversations_collection, messages_collection, profiles_collection
 from datetime import datetime
 from bson import ObjectId
 
@@ -36,6 +36,17 @@ class MessageRequest(BaseModel):
     conversation_id: str
     message: str
 
+class ProfileData(BaseModel):
+    nome_completo: str | None = None
+    edad: int | None = None
+    estado_relacion: str | None = None
+    ocupacion: str | None = None
+    enfermedades_pasadas: str | None = None
+    medicamentos_actuales: str | None = None
+    alergias: str | None = None
+    objetivos_bienestar: str | None = None
+    foto_perfil: str | None = None  # base64 encoded image
+
 # ===============================
 # AUTENTICACIÓN
 # ===============================
@@ -43,10 +54,13 @@ async def get_current_user(authorization: str = Header(...)):
     try:
         token = authorization.split(" ")[1]
         user = users_collection.find_one({"email": token})
-        if not user: raise HTTPException(status_code=401)
+        if not user: 
+            raise HTTPException(status_code=401, detail="Usuario no encontrado")
         return user
-    except:
-        raise HTTPException(status_code=401, detail="No autorizado")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"No autorizado: {str(e)}")
 
 @app.post("/auth")
 async def auth(user: UserAuth):
@@ -54,12 +68,60 @@ async def auth(user: UserAuth):
         if users_collection.find_one({"email": user.email}):
             raise HTTPException(status_code=400, detail="El usuario ya existe")
         users_collection.insert_one({"email": user.email, "password": user.password})
-        return {"msg": "Registro exitoso"}
+        return {"access_token": user.email} 
     
     db_user = users_collection.find_one({"email": user.email, "password": user.password})
     if not db_user:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     return {"access_token": user.email}
+
+# ===============================
+# GESTIÓN DE PERFILES DE USUARIO
+# ===============================
+@app.get("/profile")
+async def get_profile(current_user=Depends(get_current_user)):
+    profile = profiles_collection.find_one({"user_id": str(current_user["_id"])})
+    
+    # Valores por defecto
+    default_profile = {
+        "nome_completo": "",
+        "edad": None,
+        "estado_relacion": "",
+        "ocupacion": "",
+        "enfermedades_pasadas": "",
+        "medicamentos_actuales": "",
+        "alergias": "",
+        "objetivos_bienestar": "",
+        "foto_perfil": ""
+    }
+    
+    if not profile:
+        return default_profile
+    
+    # Remover el ID de MongoDB de la respuesta
+    profile.pop("_id", None)
+    profile.pop("user_id", None)
+    
+    # Merge con valores por defecto para campos faltantes
+    return {**default_profile, **profile}
+
+@app.post("/profile")
+async def update_profile(profile_data: ProfileData, current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    
+    # Solo incluir campos que no sean None
+    profile_dict = {k: v for k, v in profile_data.dict().items() if v is not None}
+    
+    if not profile_dict:
+        return {"msg": "No hay cambios para guardar"}
+    
+    result = profiles_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {**profile_dict, "user_id": user_id}},
+        upsert=True
+    )
+    
+    return {"msg": "Perfil actualizado correctamente"}
 
 # ===============================
 # GESTIÓN DE CONVERSACIONES
@@ -127,9 +189,35 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
         rol = "Usuario" if msg["role"] == "user" else "Hermes"
         contexto_str += f"{rol}: {msg['content']}\n"
 
+    # Cargar perfil del usuario para personalizar la respuesta
+    profile = profiles_collection.find_one({"user_id": str(current_user["_id"])})
+    profile_context = ""
+    if profile:
+        # Solo incluir campos con contenido
+        parts = []
+        if profile.get('nome_completo'):
+            parts.append(f"- Nombre: {profile.get('nome_completo')}")
+        if profile.get('edad'):
+            parts.append(f"- Edad: {profile.get('edad')}")
+        if profile.get('estado_relacion'):
+            parts.append(f"- Estado relación: {profile.get('estado_relacion')}")
+        if profile.get('ocupacion'):
+            parts.append(f"- Ocupación: {profile.get('ocupacion')}")
+        if profile.get('enfermedades_pasadas'):
+            parts.append(f"- Enfermedades pasadas: {profile.get('enfermedades_pasadas')}")
+        if profile.get('medicamentos_actuales'):
+            parts.append(f"- Medicamentos actuales: {profile.get('medicamentos_actuales')}")
+        if profile.get('alergias'):
+            parts.append(f"- Alergias: {profile.get('alergias')}")
+        if profile.get('objetivos_bienestar'):
+            parts.append(f"- Objetivos de bienestar: {profile.get('objetivos_bienestar')}")
+        
+        if parts:
+            profile_context = f"\nInformación del usuario:\n" + "\n".join(parts)
+
     async def generator():
         # ✅ AQUÍ: Cambiamos "Prometeo:" por "Hermes:" al final del prompt para que él empiece a hablar
-        full_prompt = f"{SYSTEM_PROMPT}\n\nHistorial reciente:\n{contexto_str}\nHermes:"
+        full_prompt = f"{SYSTEM_PROMPT}{profile_context}\n\nHistorial reciente:\n{contexto_str}\nHermes:"
         accumulated = ""
         for chunk in ollama.generate(model=MODEL_NAME, prompt=full_prompt, stream=True):
             content = chunk['response']

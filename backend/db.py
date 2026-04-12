@@ -10,6 +10,7 @@ db = client["Prometeo"]
 users_collection = db["Users"]
 conversations_collection = db["Conversations"]
 messages_collection = db["Messages"]
+profiles_collection = db["Profiles"]
 
 def check_db():
     try:

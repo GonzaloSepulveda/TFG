@@ -202,18 +202,26 @@ export default function Chat() {
 
       {/* 2. SIDEBAR (A la derecha) */}
       <div class="w-72 bg-white/60 backdrop-blur-md border-l border-white/50 flex flex-col p-6 shadow-sm">
-        <div class="flex items-center gap-2 mb-8 px-2 justify-center">
+        <div class="flex items-center gap-2 mb-4 px-2 justify-center">
         {/* Usamos tu imagen del corazón. Asegúrate de que el nombre coincida */}
         <img src="/corazon.png" alt="Corazón Hermes" class="w-8 h-8 object-contain" style="image-rendering: pixelated;" />
         <h2 class="text-xl font-semibold text-slate-800 tracking-tight">Hermes</h2>
       </div>
-        
-        <button 
-          class="mb-6 flex items-center justify-center gap-2 px-4 py-3 bg-teal-400 hover:bg-teal-500 text-white rounded-2xl shadow-md transition-all active:scale-95 font-medium" 
-          onClick={createNewConversation}
-        >
-          <span class="text-xl">+</span> Nueva conversación
-        </button>
+
+        <div class="flex gap-2 mb-6">
+          <button 
+            class="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-teal-400 hover:bg-teal-500 text-white rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm" 
+            onClick={createNewConversation}
+          >
+            <span class="text-xl">+</span> Nueva
+          </button>
+          <button 
+            class="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm" 
+            onClick={() => window.location.href = "/profile"}
+          >
+            <span class="text-lg">👤</span> Perfil
+          </button>
+        </div>
 
         <div class="flex-1 overflow-y-auto space-y-2 pr-2">
           <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 ml-2">Historial</p>
