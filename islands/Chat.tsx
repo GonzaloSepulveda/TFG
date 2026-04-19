@@ -3,6 +3,9 @@ import { useState, useEffect, useRef } from "preact/hooks";
 interface Message {
   role: "user" | "bot";
   content: string;
+  timestamp?: number;
+  id?: string;
+  rated?: "up" | "down" | null;
 }
 
 interface Conversation {
@@ -16,9 +19,43 @@ export default function Chat() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConv, setCurrentConv] = useState<string | null>(null);
   const [token, setToken] = useState("");
+  const [darkMode, setDarkMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isConnected, setIsConnected] = useState(true);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const endRef = useRef<HTMLDivElement>(null);
+  const isMountedRef = useRef(true);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  
   const scrollDown = () => endRef.current?.scrollIntoView({ behavior: "smooth" });
+
+  // Utilidades
+  const formatTime = (timestamp?: number) => {
+    if (!timestamp) return "";
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+  };
+
+  const copyToClipboard = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const saveDraftToStorage = (text: string) => {
+    if (currentConv) {
+      if (text.trim()) {
+        localStorage.setItem(`draft_${currentConv}`, text);
+      } else {
+        localStorage.removeItem(`draft_${currentConv}`);
+      }
+    }
+  };
+
+  const loadDraftFromStorage = (convId: string) => {
+    return localStorage.getItem(`draft_${convId}`) || "";
+  };
 
   useEffect(() => {
     const t = localStorage.getItem("token");
@@ -27,6 +64,30 @@ export default function Chat() {
     } else {
       setToken(t);
     }
+    
+    // Cargar preferencia de dark mode
+    const savedDarkMode = localStorage.getItem("darkMode") === "true";
+    setDarkMode(savedDarkMode);
+    
+    // Marcar que el componente está montado
+    isMountedRef.current = true;
+    
+    return () => {
+      isMountedRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  // Cleanup adicional - si el componente se está desmontando (navegación)
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
   }, []);
 
   const headers = {
@@ -34,64 +95,128 @@ export default function Chat() {
     "Authorization": `Bearer ${token}`,
   };
 
-  const createMessage = (role: "user" | "bot", content: string): Message => ({ role, content });
+  const createMessage = (role: "user" | "bot", content: string, timestamp?: number): Message => ({
+    role,
+    content,
+    timestamp: timestamp || Date.now(),
+    id: `msg_${Date.now()}_${Math.random()}`,
+    rated: null
+  });
 
   const loadConversations = async () => {
-    if (!token) return;
-    const res = await fetch("http://localhost:8000/conversations", { headers });
-    if (res.ok) {
-      const data = await res.json();
-      setConversations(data);
+    if (!token || !isMountedRef.current) return;
+    try {
+      const res = await fetch("http://localhost:8000/conversations", { 
+        headers,
+        signal: abortControllerRef.current?.signal 
+      });
+      if (res.ok && isMountedRef.current) {
+        const data = await res.json();
+        setConversations(data);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        console.error("Error cargando conversaciones:", err);
+      }
     }
   };
 
   const selectConversation = async (conv_id: string) => {
     setCurrentConv(conv_id);
-    const res = await fetch(`http://localhost:8000/conversations/${conv_id}/messages`, { headers });
-    if (res.ok) {
-      const msgs = await res.json();
-      setMessages(msgs);
-      setTimeout(scrollDown, 100);
+    try {
+      const res = await fetch(`http://localhost:8000/conversations/${conv_id}/messages`, { 
+        headers,
+        signal: abortControllerRef.current?.signal 
+      });
+      if (res.ok && isMountedRef.current) {
+        const msgs = await res.json();
+        // Agregar timestamps y IDs a los mensajes
+        const messagesWithMeta = msgs.map((msg: Message, idx: number) => ({
+          ...msg,
+          id: `${conv_id}_${idx}`,
+          timestamp: msg.timestamp || Date.now()
+        }));
+        setMessages(messagesWithMeta);
+        // Cargar draft guardado para esta conversación
+        const draft = loadDraftFromStorage(conv_id);
+        setInput(draft);
+        setTimeout(scrollDown, 100);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        console.error("Error cargando mensajes:", err);
+        setIsConnected(false);
+      }
     }
   };
 
   const deleteConversation = async (conv_id: string) => {
-    await fetch(`http://localhost:8000/conversations/${conv_id}`, { method: "DELETE", headers });
-    if (currentConv === conv_id) setMessages([]);
-    setCurrentConv(null);
-    loadConversations();
+    try {
+      await fetch(`http://localhost:8000/conversations/${conv_id}`, { 
+        method: "DELETE", 
+        headers,
+        signal: abortControllerRef.current?.signal 
+      });
+      if (!isMountedRef.current) return;
+      if (currentConv === conv_id) setMessages([]);
+      setCurrentConv(null);
+      loadConversations();
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        console.error("Error eliminando conversación:", err);
+      }
+    }
   };
 
   const createNewConversation = async () => {
-    const res = await fetch("http://localhost:8000/conversations", {
-      method: "POST",
-      headers,
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setCurrentConv(data.conversation_id);
-      setMessages([]); // Limpia la pantalla al instante para mejor UX
-      loadConversations();
+    try {
+      const res = await fetch("http://localhost:8000/conversations", {
+        method: "POST",
+        headers,
+        signal: abortControllerRef.current?.signal 
+      });
+      if (res.ok && isMountedRef.current) {
+        const data = await res.json();
+        setCurrentConv(data.conversation_id);
+        setMessages([]);
+        loadConversations();
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        console.error("Error creando conversación:", err);
+        alert("Error al crear nueva conversación.");
+      }
     }
   };
 
   async function sendMessage() {
-    if (!input.trim() || !token) return;
+    if (!input.trim() || !token || !isMountedRef.current) return;
 
     let targetConv = currentConv;
 
     if (!targetConv) {
-      const res = await fetch("http://localhost:8000/conversations", {
-        method: "POST",
-        headers,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        targetConv = data.conversation_id;
-        setCurrentConv(targetConv);
-        loadConversations();
-      } else {
-        alert("Error al iniciar la sesión automática.");
+      try {
+        const res = await fetch("http://localhost:8000/conversations", {
+          method: "POST",
+          headers,
+          signal: abortControllerRef.current?.signal 
+        });
+        if (res.ok && isMountedRef.current) {
+          const data = await res.json();
+          targetConv = data.conversation_id;
+          setCurrentConv(targetConv);
+          loadConversations();
+        } else {
+          if (isMountedRef.current) {
+            alert("Error al iniciar la sesión automática.");
+          }
+          return;
+        }
+      } catch (err) {
+        if (err instanceof Error && err.name !== "AbortError") {
+          console.error("Error creando conversación:", err);
+          setIsConnected(false);
+        }
         return;
       }
     }
@@ -100,6 +225,7 @@ export default function Chat() {
     setMessages((prev) => [...prev, userMsg]);
     const messageToSend = input;
     setInput("");
+    saveDraftToStorage(""); // Limpiar draft después de enviar
     setTimeout(scrollDown, 50);
 
     setMessages((prev) => {
@@ -113,10 +239,14 @@ export default function Chat() {
 
   async function streamBotResponse(botIndex: number, userInput: string, convId: string) {
     try {
+      // Crear un nuevo AbortController para esta solicitud
+      abortControllerRef.current = new AbortController();
+      
       const res = await fetch("http://localhost:8000/chat/stream", {
         method: "POST",
         headers,
         body: JSON.stringify({ message: userInput, conversation_id: convId }),
+        signal: abortControllerRef.current.signal,
       });
 
       if (!res.body) throw new Error("No hay body en la respuesta");
@@ -127,65 +257,272 @@ export default function Chat() {
       let accumulatedText = "";
 
       while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        if (value) {
-          const chunk = decoder.decode(value);
-          accumulatedText += chunk;
-          setMessages((m) => {
-            const newMessages = [...m];
-            newMessages[botIndex] = createMessage("bot", accumulatedText);
-            return newMessages;
-          });
-          scrollDown();
+        // Verificar si el componente todavía está montado
+        if (!isMountedRef.current) {
+          console.log("Componente desmontado, cancelando stream");
+          try {
+            reader.cancel();
+          } catch (e) {
+            console.error("Error al cancelar reader:", e);
+          }
+          abortControllerRef.current?.abort();
+          return;
+        }
+
+        try {
+          const { value, done: doneReading } = await reader.read();
+          done = doneReading;
+          
+          if (value) {
+            const chunk = decoder.decode(value);
+            accumulatedText += chunk;
+            
+            // Solo actualizar estado si el componente sigue montado
+            if (isMountedRef.current) {
+              setMessages((m) => {
+                const newMessages = [...m];
+                newMessages[botIndex] = createMessage("bot", accumulatedText);
+                return newMessages;
+              });
+              scrollDown();
+            }
+          }
+        } catch (readErr) {
+          if (readErr instanceof Error && readErr.name === "AbortError") {
+            console.log("Stream abortado por el cliente");
+            break;
+          }
+          throw readErr;
         }
       }
+      
       // Al terminar de contestar, recargamos el historial por si cambió el título
-      loadConversations();
-    } catch (err) {
-      setMessages((m) => [...m, createMessage("bot", "❌ Error de conexión.")]);
-      scrollDown();
+      if (isMountedRef.current) {
+        loadConversations();
+      }
+    } catch (err: unknown) {
+      // No mostrar error si fue abortado intencionalmente
+      if (err instanceof Error && err.name === "AbortError") {
+        console.log("Streaming cancelado por el usuario");
+        return;
+      }
+      
+      if (err instanceof Error) {
+        console.error("Error en streamBotResponse:", err.name, err.message);
+      }
+      
+      if (isMountedRef.current) {
+        setMessages((m) => [...m, createMessage("bot", "❌ Error de conexión.")]);
+        scrollDown();
+      }
+    } finally {
+      // Limpiar el AbortController si es que no se va a usar más
+      if (abortControllerRef.current?.signal.aborted) {
+        abortControllerRef.current = null;
+      }
     }
   }
 
   useEffect(() => { if (token) loadConversations(); }, [token]);
 
+  // Filtrar conversaciones por búsqueda
+  const filteredConversations = conversations.filter(conv =>
+    conv.title.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  // Manejar cambio de dark mode
+  const toggleDarkMode = () => {
+    const newDarkMode = !darkMode;
+    setDarkMode(newDarkMode);
+    localStorage.setItem("darkMode", String(newDarkMode));
+  };
+
+  const rateMessage = (messageId: string | undefined, rating: "up" | "down") => {
+    if (!messageId) return;
+    setMessages(prev =>
+      prev.map(msg =>
+        msg.id === messageId ? { ...msg, rated: msg.rated === rating ? null : rating } : msg
+      )
+    );
+  };
+
   return (
-    <div class="flex h-screen bg-gradient-to-br from-blue-50 to-green-50 text-slate-700 font-sans">
+    <div class={`flex h-screen text-slate-700 font-sans transition-colors ${
+      darkMode
+        ? "bg-gradient-to-br from-slate-900 to-slate-800 text-slate-100"
+        : "bg-gradient-to-br from-blue-50 to-green-50"
+    }`}>
       
       {/* 1. CHAT AREA (A la izquierda) */}
       <div class="flex-1 flex flex-col relative">
-        <div class="flex-1 overflow-y-auto p-8 space-y-6">
+        {/* Header con indicador de conexión */}
+        <div class={`px-8 py-4 border-b ${
+          darkMode
+            ? "bg-slate-800 border-slate-700"
+            : "bg-white/50 border-slate-200"
+        }`}>
+          <div class="flex items-center justify-between">
+            <h1 class="text-2xl font-bold">Hermes</h1>
+            <div class="flex items-center gap-3">
+              <span class={`flex items-center gap-2 text-sm ${
+                isConnected ? "text-green-500" : "text-red-500"
+              }`}>
+                <span class={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}></span>
+                {isConnected ? "Conectado" : "Desconectado"}
+              </span>
+              <button
+                onClick={toggleDarkMode}
+                class={`p-2 rounded-lg transition-colors ${
+                  darkMode
+                    ? "bg-slate-700 hover:bg-slate-600"
+                    : "bg-slate-100 hover:bg-slate-200"
+                }`}
+              >
+                {darkMode ? "☀️" : "🌙"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Messages */}
+        <div class={`flex-1 overflow-y-auto p-8 space-y-6 ${
+          darkMode ? "bg-slate-900" : ""
+        }`}>
           {!currentConv && messages.length === 0 && (
-            <div class="h-full flex items-center justify-center text-slate-400 italic">
-              Selecciona una conversación a la derecha o escribe un mensaje para empezar
+            <div class={`h-full flex flex-col items-center justify-center gap-4 ${
+              darkMode ? "text-slate-500" : "text-slate-400"
+            }`}>
+              <div class="text-6xl mb-4">💬</div>
+              <p class="italic">Selecciona una conversación a la derecha o escribe un mensaje para empezar</p>
+              <div class="mt-8 grid grid-cols-2 gap-3 text-sm">
+                <button
+                  onClick={() => setInput("¿Cómo puedo mejorar mi bienestar emocional?")}
+                  class={`px-4 py-2 rounded-lg transition-colors ${
+                    darkMode
+                      ? "bg-slate-700 hover:bg-slate-600"
+                      : "bg-slate-200 hover:bg-slate-300"
+                  }`}
+                >
+                  Bienestar emocional
+                </button>
+                <button
+                  onClick={() => setInput("¿Cómo manejo el estrés?")}
+                  class={`px-4 py-2 rounded-lg transition-colors ${
+                    darkMode
+                      ? "bg-slate-700 hover:bg-slate-600"
+                      : "bg-slate-200 hover:bg-slate-300"
+                  }`}
+                >
+                  Manejo del estrés
+                </button>
+                <button
+                  onClick={() => setInput("¿Qué es la inteligencia emocional?")}
+                  class={`px-4 py-2 rounded-lg transition-colors ${
+                    darkMode
+                      ? "bg-slate-700 hover:bg-slate-600"
+                      : "bg-slate-200 hover:bg-slate-300"
+                  }`}
+                >
+                  Inteligencia emocional
+                </button>
+                <button
+                  onClick={() => setInput("¿Cómo mejorar mis relaciones?")}
+                  class={`px-4 py-2 rounded-lg transition-colors ${
+                    darkMode
+                      ? "bg-slate-700 hover:bg-slate-600"
+                      : "bg-slate-200 hover:bg-slate-300"
+                  }`}
+                >
+                  Relaciones personales
+                </button>
+              </div>
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} class={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div class={`max-w-[70%] px-6 py-4 rounded-3xl shadow-sm leading-relaxed whitespace-pre-wrap ${
-                m.role === "user" 
-                  ? "bg-teal-400 text-white rounded-tr-none" 
-                  : "bg-white text-slate-700 rounded-tl-none border border-slate-100"
-              }`}>
-                {m.content}
+            <div key={i} class={`flex ${m.role === "user" ? "justify-end" : "justify-start"} group`}>
+              <div class={`max-w-[70%] flex flex-col gap-1`}>
+                <div class={`px-6 py-4 rounded-3xl shadow-sm leading-relaxed whitespace-pre-wrap transition-colors ${
+                  m.role === "user"
+                    ? darkMode
+                      ? "bg-teal-600 text-white rounded-tr-none"
+                      : "bg-teal-400 text-white rounded-tr-none"
+                    : darkMode
+                    ? "bg-slate-800 text-slate-100 rounded-tl-none border border-slate-700"
+                    : "bg-white text-slate-700 rounded-tl-none border border-slate-100"
+                }`}>
+                  {m.content}
+                </div>
+                <div class={`flex items-center gap-2 px-2 text-xs ${
+                  darkMode ? "text-slate-500" : "text-slate-400"
+                }`}>
+                  <span>{formatTime(m.timestamp)}</span>
+                  {m.role === "bot" && m.content !== "Escribiendo..." && (
+                    <>
+                      <span>•</span>
+                      <button
+                        onClick={() => copyToClipboard(m.content, m.id || "")}
+                        class={`opacity-0 group-hover:opacity-100 transition-opacity hover:text-teal-500`}
+                        title="Copiar"
+                      >
+                        {copiedId === m.id ? "✓ Copiado" : "📋 Copiar"}
+                      </button>
+                      <span>•</span>
+                      <button
+                        onClick={() => rateMessage(m.id, "up")}
+                        class={`transition-colors ${
+                          m.rated === "up" ? "text-green-500" : "hover:text-green-500"
+                        }`}
+                        title="Útil"
+                      >
+                        👍
+                      </button>
+                      <button
+                        onClick={() => rateMessage(m.id, "down")}
+                        class={`transition-colors ${
+                          m.rated === "down" ? "text-red-500" : "hover:text-red-500"
+                        }`}
+                        title="No útil"
+                      >
+                        👎
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           ))}
           <div ref={endRef} />
         </div>
 
-        <div class="p-6 bg-transparent">
-          <div class="max-w-4xl mx-auto relative flex items-center gap-3 bg-white p-2 rounded-3xl shadow-lg border border-slate-100">
+        {/* Input */}
+        <div class={`p-6 ${darkMode ? "bg-slate-800 border-t border-slate-700" : "bg-transparent"}`}>
+          <div class={`max-w-4xl mx-auto relative flex items-center gap-3 p-2 rounded-3xl shadow-lg border ${
+            darkMode
+              ? "bg-slate-700 border-slate-600"
+              : "bg-white border-slate-100"
+          }`}>
             <input
-              class="flex-1 px-6 py-3 bg-transparent outline-none text-slate-700 placeholder-slate-400"
+              class={`flex-1 px-6 py-3 bg-transparent outline-none placeholder-slate-400 ${
+                darkMode ? "text-slate-100" : "text-slate-700"
+              }`}
               placeholder="¿Cómo te sientes hoy?"
               value={input}
-              onInput={(e) => setInput(e.currentTarget.value)}
+              onInput={(e) => {
+                setInput(e.currentTarget.value);
+                saveDraftToStorage(e.currentTarget.value);
+              }}
               onKeyDown={(e) => { if (e.key === "Enter") sendMessage(); }}
             />
-            <button 
-              class={`p-3 rounded-2xl transition-all ${input.trim() ? 'bg-teal-400 text-white shadow-md' : 'bg-slate-100 text-slate-300'}`} 
+            <button
+              class={`p-3 rounded-2xl transition-all ${
+                input.trim()
+                  ? darkMode
+                    ? "bg-teal-600 hover:bg-teal-500 text-white shadow-md"
+                    : "bg-teal-400 hover:bg-teal-500 text-white shadow-md"
+                  : darkMode
+                  ? "bg-slate-600 text-slate-400 cursor-not-allowed"
+                  : "bg-slate-100 text-slate-300 cursor-not-allowed"
+              }`}
               onClick={sendMessage}
               disabled={!input.trim()}
             >
@@ -194,59 +531,130 @@ export default function Chat() {
               </svg>
             </button>
           </div>
-          <p class="text-center text-[10px] text-slate-400 mt-3">
+          <p class={`text-center text-[10px] mt-3 ${
+            darkMode ? "text-slate-500" : "text-slate-400"
+          }`}>
             Hermes es una IA de apoyo y no sustituye el consejo médico profesional.
           </p>
         </div>
       </div>
 
       {/* 2. SIDEBAR (A la derecha) */}
-      <div class="w-72 bg-white/60 backdrop-blur-md border-l border-white/50 flex flex-col p-6 shadow-sm">
-        <div class="flex items-center gap-2 mb-4 px-2 justify-center">
-        {/* Usamos tu imagen del corazón. Asegúrate de que el nombre coincida */}
-        <img src="/corazon.png" alt="Corazón Hermes" class="w-8 h-8 object-contain" style="image-rendering: pixelated;" />
-        <h2 class="text-xl font-semibold text-slate-800 tracking-tight">Hermes</h2>
-      </div>
-
-        <div class="flex gap-2 mb-6">
-          <button 
-            class="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-teal-400 hover:bg-teal-500 text-white rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm" 
-            onClick={createNewConversation}
-          >
-            <span class="text-xl">+</span> Nueva
-          </button>
-          <button 
-            class="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm" 
-            onClick={() => window.location.href = "/profile"}
-          >
-            <span class="text-lg">👤</span> Perfil
-          </button>
+      <div class={`w-72 flex flex-col p-6 shadow-sm transition-colors ${
+        darkMode
+          ? "bg-slate-800 border-l border-slate-700"
+          : "bg-white/60 backdrop-blur-md border-l border-white/50"
+      }`}>
+        <div class="flex items-center gap-2 mb-6 px-2 justify-center">
+          <img src="/corazon.png" alt="Corazón Hermes" class="w-8 h-8 object-contain" style="image-rendering: pixelated;" />
+          <h2 class={`text-xl font-semibold tracking-tight ${
+            darkMode ? "text-slate-100" : "text-slate-800"
+          }`}>Hermes</h2>
         </div>
 
-        <div class="flex-1 overflow-y-auto space-y-2 pr-2">
-          <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 ml-2">Historial</p>
-          {conversations.map((conv) => (
-            <div 
-              key={conv.conversation_id} 
-              class={`group flex justify-between items-center px-4 py-3 rounded-2xl transition-all cursor-pointer ${currentConv === conv.conversation_id ? 'bg-white shadow-sm ring-1 ring-slate-100' : 'hover:bg-white/40'}`}
+        {/* Menu con scroll horizontal */}
+        <div class="mb-6 overflow-x-auto scrollbar-thin scrollbar-thumb-slate-400 scrollbar-track-transparent">
+          <div class="flex gap-2 pb-2">
+            <button
+              class={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm whitespace-nowrap flex-shrink-0 ${
+                darkMode
+                  ? "bg-teal-600 hover:bg-teal-500 text-white"
+                  : "bg-teal-400 hover:bg-teal-500 text-white"
+              }`}
+              onClick={createNewConversation}
+            >
+              <span class="text-xl">+</span> Nueva
+            </button>
+            <button
+              class={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm whitespace-nowrap flex-shrink-0 ${
+                darkMode
+                  ? "bg-slate-700 hover:bg-slate-600 text-slate-300"
+                  : "bg-slate-200 hover:bg-slate-300 text-slate-700"
+              }`}
+              onClick={() => window.location.href = "/profile"}
+            >
+              <span class="text-lg">👤</span> Perfil
+            </button>
+            <button
+              class={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm whitespace-nowrap flex-shrink-0 ${
+                darkMode
+                  ? "bg-purple-700 hover:bg-purple-600 text-purple-200"
+                  : "bg-purple-100 hover:bg-purple-200 text-purple-700"
+              }`}
+              onClick={() => window.location.href = "/stats"}
+            >
+              <span class="text-lg">📊</span> Stats
+            </button>
+          </div>
+        </div>
+
+        {/* Search */}
+        <div class="mb-4">
+          <input
+            type="text"
+            placeholder="Buscar..."
+            value={searchQuery}
+            onInput={(e) => setSearchQuery(e.currentTarget.value)}
+            class={`w-full px-4 py-2 rounded-lg outline-none text-sm transition-colors ${
+              darkMode
+                ? "bg-slate-700 text-slate-100 placeholder-slate-500 focus:bg-slate-600"
+                : "bg-slate-100 text-slate-700 placeholder-slate-400 focus:bg-slate-200"
+            }`}
+          />
+        </div>
+
+        <div class={`flex-1 overflow-y-auto space-y-2 pr-2`}>
+          <p class={`text-xs font-bold uppercase tracking-widest mb-3 ml-2 ${
+            darkMode ? "text-slate-500" : "text-slate-400"
+          }`}>
+            Historial ({filteredConversations.length})
+          </p>
+          {filteredConversations.map((conv) => (
+            <div
+              key={conv.conversation_id}
+              class={`group flex justify-between items-center px-4 py-3 rounded-2xl transition-all cursor-pointer ${
+                currentConv === conv.conversation_id
+                  ? darkMode
+                    ? "bg-slate-700 shadow-sm ring-1 ring-teal-500"
+                    : "bg-white shadow-sm ring-1 ring-slate-100"
+                  : darkMode
+                  ? "hover:bg-slate-700"
+                  : "hover:bg-white/40"
+              }`}
               onClick={() => selectConversation(conv.conversation_id)}
             >
-              <span class="text-sm truncate font-medium text-slate-600">
+              <span class={`text-sm truncate font-medium ${
+                darkMode ? "text-slate-200" : "text-slate-600"
+              }`}>
                 {conv.title}
               </span>
-              <button 
-                class="opacity-0 group-hover:opacity-100 ml-2 text-slate-300 hover:text-red-400 font-bold transition-opacity" 
-                onClick={(e) => { e.stopPropagation(); deleteConversation(conv.conversation_id); }}
+              <button
+                class={`opacity-0 group-hover:opacity-100 ml-2 font-bold transition-opacity ${
+                  darkMode
+                    ? "text-slate-500 hover:text-red-400"
+                    : "text-slate-300 hover:text-red-400"
+                }`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteConversation(conv.conversation_id);
+                }}
               >
                 ✕
               </button>
             </div>
           ))}
         </div>
-        
-        <button 
-          onClick={() => { localStorage.removeItem("token"); window.location.href = "/"; }}
-          class="mt-4 text-xs font-semibold text-slate-400 hover:text-red-400 transition-colors"
+
+        <button
+          onClick={() => {
+            localStorage.removeItem("token");
+            window.location.href = "/";
+          }}
+          class={`mt-4 text-xs font-semibold transition-colors ${
+            darkMode
+              ? "text-slate-500 hover:text-red-400"
+              : "text-slate-400 hover:text-red-400"
+          }`}
         >
           Cerrar sesión
         </button>

@@ -1,5 +1,5 @@
 # 1. Base Model (Ensure the exact file name matches)
-FROM ./Models/hermes.gguf
+FROM ./Models/Hermes_v0.1.0.gguf
 
 # 2. TECHNICAL PARAMETERS
 # Temperature at 0.7 is ideal for psychology: gives naturalness and empathy without losing coherence.
@@ -13,7 +13,11 @@ PARAMETER num_ctx 4096
 # Cuts the model's generation as soon as it tries to impersonate the user.
 PARAMETER stop "User:"
 PARAMETER stop "\nUser:"
-
+PARAMETER stop "Usuario:"
+PARAMETER stop "\nUsuario:"
+PARAMETER stop "Usuario: "
+PARAMETER stop "Hermes: "
+PARAMETER stop "Prometeo: "
 # ✅ Repetition penalty
 # Prevents Hermes from stuttering or repeating the same validation over and over.
 PARAMETER repeat_penalty 1.15

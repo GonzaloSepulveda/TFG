@@ -3,9 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import ollama
-from db import users_collection, conversations_collection, messages_collection, profiles_collection
+from db import users_collection, conversations_collection, messages_collection, profiles_collection, ratings_collection, stats_collection
 from datetime import datetime
 from bson import ObjectId
+import asyncio
+import logging
+
+# Configurar logging para ver excepciones de socket
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ✅ Título actualizado a Hermes
 app = FastAPI(title="Hermes API - Bienestar Emocional")
@@ -46,6 +52,11 @@ class ProfileData(BaseModel):
     alergias: str | None = None
     objetivos_bienestar: str | None = None
     foto_perfil: str | None = None  # base64 encoded image
+
+class MessageRating(BaseModel):
+    message_id: str
+    conversation_id: str
+    rating: str  # "up" o "down"
 
 # ===============================
 # AUTENTICACIÓN
@@ -177,15 +188,19 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
             {"$set": {"title": nuevo_titulo}}
         )
 
-    # Recuperamos los últimos 4 mensajes para dar contexto al modelo (Memoria a corto plazo)
-    historial = messages_collection.find({
+    # Recuperamos los últimos 5 para excluir el actual (que acabo de guardar)
+    historial_raw = list(messages_collection.find({
         "conversation_id": request.conversation_id,
         "user_id": str(current_user["_id"])
-    }).sort("timestamp", -1).limit(4)
+    }).sort("timestamp", -1).limit(5))
+    
+    # Excluir el último mensaje (el que acabo de guardar) del contexto histórico
+    # Así el mensaje actual queda separado y no se mezcla con el patrón del diálogo
+    if historial_raw:
+        historial_raw = historial_raw[1:]  # Saltamos el más reciente
     
     contexto_str = ""
-    for msg in reversed(list(historial)):
-        # ✅ AQUÍ: Cambiamos "Prometeo" por "Hermes" para las etiquetas del historial
+    for msg in reversed(historial_raw):
         rol = "Usuario" if msg["role"] == "user" else "Hermes"
         contexto_str += f"{rol}: {msg['content']}\n"
 
@@ -216,21 +231,158 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
             profile_context = f"\nInformación del usuario:\n" + "\n".join(parts)
 
     async def generator():
-        # ✅ AQUÍ: Cambiamos "Prometeo:" por "Hermes:" al final del prompt para que él empiece a hablar
-        full_prompt = f"{SYSTEM_PROMPT}{profile_context}\n\nHistorial reciente:\n{contexto_str}\nHermes:"
+        # Construir prompt explícitamente separando contexto histórico de la pregunta actual
+        # Esto evita que el modelo continúe el patrón "Usuario: ... Hermes: ..." indefinidamente
+        full_prompt = (
+            f"{SYSTEM_PROMPT}"
+            f"{profile_context}"
+            f"\n\n--- Historial reciente de la conversación ---\n{contexto_str}"
+            f"\n--- Pregunta actual del usuario ---\n"
+            f"Usuario: {request.message}\n"
+            f"\n--- Respuesta de Hermes ---\nHermes: "
+        )
         accumulated = ""
-        for chunk in ollama.generate(model=MODEL_NAME, prompt=full_prompt, stream=True):
-            content = chunk['response']
-            accumulated += content
-            yield content
+        try:
+            for chunk in ollama.generate(model=MODEL_NAME, prompt=full_prompt, stream=True):
+                content = chunk['response']
+                accumulated += content
+                try:
+                    yield content
+                except (BrokenPipeError, ConnectionResetError, RuntimeError) as e:
+                    # El cliente cerró la conexión, salir sin error
+                    logger.info(f"Cliente desconectado durante streaming: {type(e).__name__}")
+                    break
+        except GeneratorExit:
+            # El cliente cerró la conexión, salir gracefully
+            logger.info("GeneratorExit: cliente cerró la conexión")
+            pass
+        except (BrokenPipeError, ConnectionResetError, RuntimeError) as e:
+            # Errores de socket cuando el cliente se desconecta
+            logger.info(f"Error de socket durante generación: {type(e).__name__}")
+            pass
+        except Exception as e:
+            logger.error(f"Error inesperado durante streaming: {str(e)}")
+            # Si hay error, intentar actualizar si es posible
+            if accumulated:
+                try:
+                    messages_collection.insert_one({
+                        "conversation_id": request.conversation_id,
+                        "user_id": str(current_user["_id"]),
+                        "role": "bot",
+                        "content": accumulated,
+                        "timestamp": datetime.now()
+                    })
+                except Exception as db_err:
+                    logger.error(f"Error guardando mensaje en BD: {str(db_err)}")
+            return
         
-        # Guardamos la respuesta de la IA cuando termine
-        messages_collection.insert_one({
-            "conversation_id": request.conversation_id,
-            "user_id": str(current_user["_id"]),
-            "role": "bot",
-            "content": accumulated,
-            "timestamp": datetime.now()
-        })
+        # Guardamos la respuesta de la IA cuando termine normalmente
+        if accumulated:
+            try:
+                messages_collection.insert_one({
+                    "conversation_id": request.conversation_id,
+                    "user_id": str(current_user["_id"]),
+                    "role": "bot",
+                    "content": accumulated,
+                    "timestamp": datetime.now()
+                })
+            except Exception as e:
+                logger.error(f"Error guardando respuesta en BD: {str(e)}")
 
     return StreamingResponse(generator(), media_type="text/plain")
+
+# ===============================
+# RATING DE MENSAJES
+# ===============================
+@app.post("/messages/rate")
+async def rate_message(rating: MessageRating, current_user=Depends(get_current_user)):
+    try:
+        ratings_collection.update_one(
+            {
+                "user_id": str(current_user["_id"]),
+                "conversation_id": rating.conversation_id,
+                "message_id": rating.message_id
+            },
+            {
+                "$set": {
+                    "user_id": str(current_user["_id"]),
+                    "conversation_id": rating.conversation_id,
+                    "message_id": rating.message_id,
+                    "rating": rating.rating,
+                    "timestamp": datetime.now()
+                }
+            },
+            upsert=True
+        )
+        return {"msg": "Rating guardado"}
+    except Exception as e:
+        logger.error(f"Error guardando rating: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al guardar el rating")
+
+# ===============================
+# ESTADÍSTICAS DEL USUARIO
+# ===============================
+@app.get("/stats")
+async def get_user_stats(current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    
+    # Total de conversaciones
+    total_conversations = conversations_collection.count_documents({"user_id": user_id})
+    
+    # Total de mensajes
+    total_messages = messages_collection.count_documents({"user_id": user_id})
+    
+    # Total de mensajes del usuario vs del bot
+    user_messages = messages_collection.count_documents({"user_id": user_id, "role": "user"})
+    bot_messages = messages_collection.count_documents({"user_id": user_id, "role": "bot"})
+    
+    # Ratings positivos y negativos
+    positive_ratings = ratings_collection.count_documents({"user_id": user_id, "rating": "up"})
+    negative_ratings = ratings_collection.count_documents({"user_id": user_id, "rating": "down"})
+    
+    return {
+        "total_conversations": total_conversations,
+        "total_messages": total_messages,
+        "user_messages": user_messages,
+        "bot_messages": bot_messages,
+        "positive_ratings": positive_ratings,
+        "negative_ratings": negative_ratings,
+        "satisfaction_rate": round((positive_ratings / (positive_ratings + negative_ratings) * 100), 1) if (positive_ratings + negative_ratings) > 0 else 0
+    }
+
+@app.get("/conversations/{conversation_id}/stats")
+async def get_conversation_stats(conversation_id: str, current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    
+    # Validar que pertenezca al usuario
+    conv = conversations_collection.find_one({"_id": ObjectId(conversation_id), "user_id": user_id})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    
+    # Mensaje más reciente
+    last_message = messages_collection.find_one(
+        {"conversation_id": conversation_id, "user_id": user_id},
+        sort=[("timestamp", -1)]
+    )
+    
+    # Duración de la conversación
+    first_message = messages_collection.find_one(
+        {"conversation_id": conversation_id, "user_id": user_id},
+        sort=[("timestamp", 1)]
+    )
+    
+    if first_message and last_message:
+        duration = (last_message["timestamp"] - first_message["timestamp"]).total_seconds() / 60
+    else:
+        duration = 0
+    
+    # Total de mensajes
+    total_msgs = messages_collection.count_documents({"conversation_id": conversation_id, "user_id": user_id})
+    
+    return {
+        "title": conv.get("title", "Nueva sesión"),
+        "created_at": conv.get("created_at"),
+        "total_messages": total_msgs,
+        "duration_minutes": round(duration, 1),
+        "last_message_at": last_message.get("timestamp") if last_message else None
+    }
