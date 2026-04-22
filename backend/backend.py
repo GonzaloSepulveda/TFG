@@ -25,13 +25,24 @@ app.add_middleware(
 
 MODEL_NAME = "hermes"
 
-# El System Prompt define la identidad central
-SYSTEM_PROMPT = (
+# System Prompts en español e inglés
+SYSTEM_PROMPT_EN = (
+    "You are Hermes, an empathetic assistant specialized in emotional wellness. "
+    "Your tone should be calm, understanding, and professional. You are not a replacement for a psychologist, "
+    "but you offer support, emotional validation, and active listening in English. "
+    "If you detect serious risk, gently suggest seeking professional help."
+)
+
+SYSTEM_PROMPT_ES = (
     "Eres Hermes, un asistente empático especializado en bienestar emocional. "
     "Tu tono debe ser calmado, comprensivo y profesional. No sustituyes a un psicólogo, "
     "pero ofreces apoyo, validación emocional y escucha activa en español. "
     "Si detectas riesgo grave, sugiere amablemente buscar ayuda profesional."
 )
+
+def get_system_prompt(language: str = "en") -> str:
+    """Get system prompt based on language code"""
+    return SYSTEM_PROMPT_ES if language == "es" else SYSTEM_PROMPT_EN
 
 class UserAuth(BaseModel):
     email: str
@@ -41,6 +52,7 @@ class UserAuth(BaseModel):
 class MessageRequest(BaseModel):
     conversation_id: str
     message: str
+    language: str = "en"  # "en" o "es"
 
 class ProfileData(BaseModel):
     nome_completo: str | None = None
@@ -231,15 +243,16 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
             profile_context = f"\nInformación del usuario:\n" + "\n".join(parts)
 
     async def generator():
-        # Construir prompt explícitamente separando contexto histórico de la pregunta actual
-        # Esto evita que el modelo continúe el patrón "Usuario: ... Hermes: ..." indefinidamente
+        # Obtener el system prompt según el idioma seleccionado
+        system_prompt = get_system_prompt(request.language)
+        
+        # Construir prompt sin separadores explícitos para evitar que el modelo los reproduzca
         full_prompt = (
-            f"{SYSTEM_PROMPT}"
+            f"{system_prompt}"
             f"{profile_context}"
-            f"\n\n--- Historial reciente de la conversación ---\n{contexto_str}"
-            f"\n--- Pregunta actual del usuario ---\n"
-            f"Usuario: {request.message}\n"
-            f"\n--- Respuesta de Hermes ---\nHermes: "
+            f"\n\nRecent history:\n{contexto_str}"
+            f"User: {request.message}\n"
+            f"Hermes: "
         )
         accumulated = ""
         try:

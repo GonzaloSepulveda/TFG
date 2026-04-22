@@ -13,6 +13,65 @@ interface Conversation {
   title: string;
 }
 
+const translations = {
+  en: {
+    writing: "Writing...",
+    placeholder: "How are you feeling today?",
+    selectConv: "Select a conversation on the right or write a message to start",
+    emotionalWellness: "Emotional wellness",
+    stressManagement: "Stress management",
+    emotionalIntelligence: "Emotional intelligence",
+    relationships: "Relationships",
+    connected: "Connected",
+    disconnected: "Disconnected",
+    disclaimer: "Hermes is an AI for emotional support and does not replace professional medical advice.",
+    new: "New",
+    profile: "Profile",
+    stats: "Stats",
+    search: "Search...",
+    history: "History",
+    signOut: "Sign out",
+    copied: "✓ Copied",
+    copy: "📋 Copy",
+    useful: "👍",
+    notUseful: "👎",
+    errorConnection: "❌ Connection error.",
+    stop: "Stop",
+    send: "Send",
+    errorCreatingConv: "Error creating new conversation.",
+    errorAutoSession: "Error starting automatic session.",
+  },
+  es: {
+    writing: "Escribiendo...",
+    placeholder: "¿Cómo te sientes hoy?",
+    selectConv: "Selecciona una conversación a la derecha o escribe un mensaje para empezar",
+    emotionalWellness: "Bienestar emocional",
+    stressManagement: "Manejo del estrés",
+    emotionalIntelligence: "Inteligencia emocional",
+    relationships: "Relaciones personales",
+    connected: "Conectado",
+    disconnected: "Desconectado",
+    disclaimer: "Hermes es una IA de apoyo y no sustituye el consejo médico profesional.",
+    new: "Nueva",
+    profile: "Perfil",
+    stats: "Stats",
+    search: "Buscar...",
+    history: "Historial",
+    signOut: "Cerrar sesión",
+    copied: "✓ Copiado",
+    copy: "📋 Copiar",
+    useful: "👍",
+    notUseful: "👎",
+    errorConnection: "❌ Error de conexión.",
+    stop: "Detener",
+    send: "Enviar",
+    errorCreatingConv: "Error al crear nueva conversación.",
+    errorAutoSession: "Error al iniciar la sesión automática.",
+  }
+};
+
+type TranslationKey = keyof typeof translations.en;
+
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -23,10 +82,14 @@ export default function Chat() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isConnected, setIsConnected] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [language, setLanguage] = useState<"en" | "es">("en");
 
   const endRef = useRef<HTMLDivElement>(null);
   const isMountedRef = useRef(true);
   const abortControllerRef = useRef<AbortController | null>(null);
+  
+  const t = (key: TranslationKey) => translations[language][key];
   
   const scrollDown = () => endRef.current?.scrollIntoView({ behavior: "smooth" });
 
@@ -68,6 +131,10 @@ export default function Chat() {
     // Cargar preferencia de dark mode
     const savedDarkMode = localStorage.getItem("darkMode") === "true";
     setDarkMode(savedDarkMode);
+    
+    // Cargar preferencia de idioma
+    const savedLanguage = (localStorage.getItem("language") || "en") as "en" | "es";
+    setLanguage(savedLanguage);
     
     // Marcar que el componente está montado
     isMountedRef.current = true;
@@ -183,8 +250,8 @@ export default function Chat() {
       }
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
-        console.error("Error creando conversación:", err);
-        alert("Error al crear nueva conversación.");
+        console.error("Error creating conversation:", err);
+        alert(t("errorCreatingConv"));
       }
     }
   };
@@ -208,7 +275,7 @@ export default function Chat() {
           loadConversations();
         } else {
           if (isMountedRef.current) {
-            alert("Error al iniciar la sesión automática.");
+            alert(t("errorAutoSession"));
           }
           return;
         }
@@ -229,23 +296,24 @@ export default function Chat() {
     setTimeout(scrollDown, 50);
 
     setMessages((prev) => {
-      const botMsg = createMessage("bot", "Escribiendo...");
+      const botMsg = createMessage("bot", t("writing"));
       const newMessages = [...prev, botMsg];
       const botIndex = newMessages.length - 1;
-      streamBotResponse(botIndex, messageToSend, targetConv as string);
+      streamBotResponse(botIndex, messageToSend, targetConv as string, language);
       return newMessages;
     });
   }
 
-  async function streamBotResponse(botIndex: number, userInput: string, convId: string) {
+  async function streamBotResponse(botIndex: number, userInput: string, convId: string, lang: "en" | "es") {
     try {
+      setIsGenerating(true);
       // Crear un nuevo AbortController para esta solicitud
       abortControllerRef.current = new AbortController();
       
       const res = await fetch("http://localhost:8000/chat/stream", {
         method: "POST",
         headers,
-        body: JSON.stringify({ message: userInput, conversation_id: convId }),
+        body: JSON.stringify({ message: userInput, conversation_id: convId, language: lang }),
         signal: abortControllerRef.current.signal,
       });
 
@@ -299,11 +367,13 @@ export default function Chat() {
       // Al terminar de contestar, recargamos el historial por si cambió el título
       if (isMountedRef.current) {
         loadConversations();
+        setIsGenerating(false);
       }
     } catch (err: unknown) {
       // No mostrar error si fue abortado intencionalmente
       if (err instanceof Error && err.name === "AbortError") {
         console.log("Streaming cancelado por el usuario");
+        setIsGenerating(false);
         return;
       }
       
@@ -312,13 +382,15 @@ export default function Chat() {
       }
       
       if (isMountedRef.current) {
-        setMessages((m) => [...m, createMessage("bot", "❌ Error de conexión.")]);
+        setMessages((m) => [...m, createMessage("bot", t("errorConnection"))]);
         scrollDown();
+        setIsGenerating(false);
       }
     } finally {
       // Limpiar el AbortController si es que no se va a usar más
       if (abortControllerRef.current?.signal.aborted) {
         abortControllerRef.current = null;
+        setIsGenerating(false);
       }
     }
   }
@@ -346,6 +418,18 @@ export default function Chat() {
     );
   };
 
+  const stopStreaming = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setIsGenerating(false);
+    }
+  };
+
+  const toggleLanguage = (lang: "en" | "es") => {
+    setLanguage(lang);
+    localStorage.setItem("language", lang);
+  };
+
   return (
     <div class={`flex h-screen text-slate-700 font-sans transition-colors ${
       darkMode
@@ -368,8 +452,36 @@ export default function Chat() {
                 isConnected ? "text-green-500" : "text-red-500"
               }`}>
                 <span class={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}></span>
-                {isConnected ? "Conectado" : "Desconectado"}
+                {isConnected ? t("connected") : t("disconnected")}
               </span>
+              <div class="flex gap-1 bg-slate-200 dark:bg-slate-700 p-1 rounded-lg">
+                <button
+                  onClick={() => toggleLanguage("es")}
+                  class={`px-3 py-1 rounded transition-all text-sm font-medium ${
+                    language === "es"
+                      ? darkMode
+                        ? "bg-slate-600 text-white"
+                        : "bg-white text-slate-800 shadow"
+                      : "text-slate-700 dark:text-slate-300 hover:opacity-70"
+                  }`}
+                  title="Español"
+                >
+                  🇪🇸
+                </button>
+                <button
+                  onClick={() => toggleLanguage("en")}
+                  class={`px-3 py-1 rounded transition-all text-sm font-medium ${
+                    language === "en"
+                      ? darkMode
+                        ? "bg-slate-600 text-white"
+                        : "bg-white text-slate-800 shadow"
+                      : "text-slate-700 dark:text-slate-300 hover:opacity-70"
+                  }`}
+                  title="English"
+                >
+                  🇬🇧
+                </button>
+              </div>
               <button
                 onClick={toggleDarkMode}
                 class={`p-2 rounded-lg transition-colors ${
@@ -393,47 +505,47 @@ export default function Chat() {
               darkMode ? "text-slate-500" : "text-slate-400"
             }`}>
               <div class="text-6xl mb-4">💬</div>
-              <p class="italic">Selecciona una conversación a la derecha o escribe un mensaje para empezar</p>
+              <p class="italic">{t("selectConv")}</p>
               <div class="mt-8 grid grid-cols-2 gap-3 text-sm">
                 <button
-                  onClick={() => setInput("¿Cómo puedo mejorar mi bienestar emocional?")}
+                  onClick={() => setInput(language === "es" ? "¿Cómo puedo mejorar mi bienestar emocional?" : "How can I improve my emotional wellness?")}
                   class={`px-4 py-2 rounded-lg transition-colors ${
                     darkMode
                       ? "bg-slate-700 hover:bg-slate-600"
                       : "bg-slate-200 hover:bg-slate-300"
                   }`}
                 >
-                  Bienestar emocional
+                  {t("emotionalWellness")}
                 </button>
                 <button
-                  onClick={() => setInput("¿Cómo manejo el estrés?")}
+                  onClick={() => setInput(language === "es" ? "¿Cómo manejo el estrés?" : "How do I manage stress?")}
                   class={`px-4 py-2 rounded-lg transition-colors ${
                     darkMode
                       ? "bg-slate-700 hover:bg-slate-600"
                       : "bg-slate-200 hover:bg-slate-300"
                   }`}
                 >
-                  Manejo del estrés
+                  {t("stressManagement")}
                 </button>
                 <button
-                  onClick={() => setInput("¿Qué es la inteligencia emocional?")}
+                  onClick={() => setInput(language === "es" ? "¿Qué es la inteligencia emocional?" : "What is emotional intelligence?")}
                   class={`px-4 py-2 rounded-lg transition-colors ${
                     darkMode
                       ? "bg-slate-700 hover:bg-slate-600"
                       : "bg-slate-200 hover:bg-slate-300"
                   }`}
                 >
-                  Inteligencia emocional
+                  {t("emotionalIntelligence")}
                 </button>
                 <button
-                  onClick={() => setInput("¿Cómo mejorar mis relaciones?")}
+                  onClick={() => setInput(language === "es" ? "¿Cómo puedo mejorar mis relaciones?" : "How can I improve my relationships?")}
                   class={`px-4 py-2 rounded-lg transition-colors ${
                     darkMode
                       ? "bg-slate-700 hover:bg-slate-600"
                       : "bg-slate-200 hover:bg-slate-300"
                   }`}
                 >
-                  Relaciones personales
+                  {t("relationships")}
                 </button>
               </div>
             </div>
@@ -462,9 +574,9 @@ export default function Chat() {
                       <button
                         onClick={() => copyToClipboard(m.content, m.id || "")}
                         class={`opacity-0 group-hover:opacity-100 transition-opacity hover:text-teal-500`}
-                        title="Copiar"
+                        title={t("copy")}
                       >
-                        {copiedId === m.id ? "✓ Copiado" : "📋 Copiar"}
+                        {copiedId === m.id ? t("copied") : t("copy")}
                       </button>
                       <span>•</span>
                       <button
@@ -505,7 +617,7 @@ export default function Chat() {
               class={`flex-1 px-6 py-3 bg-transparent outline-none placeholder-slate-400 ${
                 darkMode ? "text-slate-100" : "text-slate-700"
               }`}
-              placeholder="¿Cómo te sientes hoy?"
+              placeholder={t("placeholder")}
               value={input}
               onInput={(e) => {
                 setInput(e.currentTarget.value);
@@ -513,28 +625,41 @@ export default function Chat() {
               }}
               onKeyDown={(e) => { if (e.key === "Enter") sendMessage(); }}
             />
-            <button
-              class={`p-3 rounded-2xl transition-all ${
-                input.trim()
-                  ? darkMode
-                    ? "bg-teal-600 hover:bg-teal-500 text-white shadow-md"
-                    : "bg-teal-400 hover:bg-teal-500 text-white shadow-md"
-                  : darkMode
-                  ? "bg-slate-600 text-slate-400 cursor-not-allowed"
-                  : "bg-slate-100 text-slate-300 cursor-not-allowed"
-              }`}
-              onClick={sendMessage}
-              disabled={!input.trim()}
-            >
-              <svg class="w-6 h-6 rotate-90" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-              </svg>
-            </button>
+            {isGenerating ? (
+              <button
+                class={`p-3 rounded-2xl transition-all bg-red-500 hover:bg-red-600 text-white shadow-md`}
+                onClick={stopStreaming}
+                title={t("stop")}
+              >
+                <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
+                  <rect x="4" y="4" width="12" height="12" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                class={`p-3 rounded-2xl transition-all ${
+                  input.trim()
+                    ? darkMode
+                      ? "bg-teal-600 hover:bg-teal-500 text-white shadow-md"
+                      : "bg-teal-400 hover:bg-teal-500 text-white shadow-md"
+                    : darkMode
+                    ? "bg-slate-600 text-slate-400 cursor-not-allowed"
+                    : "bg-slate-100 text-slate-300 cursor-not-allowed"
+                }`}
+                onClick={sendMessage}
+                disabled={!input.trim()}
+                title={t("send")}
+              >
+                <svg class="w-6 h-6 rotate-90" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                </svg>
+              </button>
+            )}
           </div>
           <p class={`text-center text-[10px] mt-3 ${
             darkMode ? "text-slate-500" : "text-slate-400"
           }`}>
-            Hermes es una IA de apoyo y no sustituye el consejo médico profesional.
+            {t("disclaimer")}
           </p>
         </div>
       </div>
@@ -563,7 +688,7 @@ export default function Chat() {
               }`}
               onClick={createNewConversation}
             >
-              <span class="text-xl">+</span> Nueva
+              <span class="text-xl">+</span> {t("new")}
             </button>
             <button
               class={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm whitespace-nowrap flex-shrink-0 ${
@@ -573,7 +698,7 @@ export default function Chat() {
               }`}
               onClick={() => window.location.href = "/profile"}
             >
-              <span class="text-lg">👤</span> Perfil
+              <span class="text-lg">👤</span> {t("profile")}
             </button>
             <button
               class={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm whitespace-nowrap flex-shrink-0 ${
@@ -592,7 +717,7 @@ export default function Chat() {
         <div class="mb-4">
           <input
             type="text"
-            placeholder="Buscar..."
+            placeholder={t("search")}
             value={searchQuery}
             onInput={(e) => setSearchQuery(e.currentTarget.value)}
             class={`w-full px-4 py-2 rounded-lg outline-none text-sm transition-colors ${
@@ -607,7 +732,7 @@ export default function Chat() {
           <p class={`text-xs font-bold uppercase tracking-widest mb-3 ml-2 ${
             darkMode ? "text-slate-500" : "text-slate-400"
           }`}>
-            Historial ({filteredConversations.length})
+            {t("history")} ({filteredConversations.length})
           </p>
           {filteredConversations.map((conv) => (
             <div
@@ -656,7 +781,7 @@ export default function Chat() {
               : "text-slate-400 hover:text-red-400"
           }`}
         >
-          Cerrar sesión
+          {t("signOut")}
         </button>
       </div>
 
