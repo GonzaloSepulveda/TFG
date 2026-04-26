@@ -10,10 +10,12 @@ import * as $index from "./routes/index.tsx";
 import * as $login from "./routes/login.tsx";
 import * as $profile from "./routes/profile.tsx";
 import * as $stats from "./routes/stats.tsx";
+import * as $vault from "./routes/vault.tsx";
 import * as $Chat from "./islands/Chat.tsx";
 import * as $Login from "./islands/Login.tsx";
 import * as $Profile from "./islands/Profile.tsx";
 import * as $Stats from "./islands/Stats.tsx";
+import * as $Vault from "./islands/Vault.tsx";
 import type { Manifest } from "$fresh/server.ts";
 
 const manifest = {
@@ -26,12 +28,14 @@ const manifest = {
     "./routes/login.tsx": $login,
     "./routes/profile.tsx": $profile,
     "./routes/stats.tsx": $stats,
+    "./routes/vault.tsx": $vault,
   },
   islands: {
     "./islands/Chat.tsx": $Chat,
     "./islands/Login.tsx": $Login,
     "./islands/Profile.tsx": $Profile,
     "./islands/Stats.tsx": $Stats,
+    "./islands/Vault.tsx": $Vault,
   },
   baseUrl: import.meta.url,
 } satisfies Manifest;

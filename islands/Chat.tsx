@@ -11,6 +11,12 @@ interface Message {
 interface Conversation {
   conversation_id: string;
   title: string;
+  tags?: Tag[];
+}
+
+interface Tag {
+  name: string;
+  color: string;
 }
 
 const translations = {
@@ -40,6 +46,7 @@ const translations = {
     send: "Send",
     errorCreatingConv: "Error creating new conversation.",
     errorAutoSession: "Error starting automatic session.",
+    model: "Model",
   },
   es: {
     writing: "Escribiendo...",
@@ -67,6 +74,7 @@ const translations = {
     send: "Enviar",
     errorCreatingConv: "Error al crear nueva conversación.",
     errorAutoSession: "Error al iniciar la sesión automática.",
+    model: "Modelo",
   }
 };
 
@@ -84,6 +92,12 @@ export default function Chat() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [language, setLanguage] = useState<"en" | "es">("en");
+  const [model, setModel] = useState<"hermes" | "hermes-mini">("hermes");
+  const [showModelSelector, setShowModelSelector] = useState(false);
+  const [currentTags, setCurrentTags] = useState<Tag[]>([]);
+  const [newTagName, setNewTagName] = useState("");
+  const [newTagColor, setNewTagColor] = useState("#3b82f6");
+  const [showTagInput, setShowTagInput] = useState(false);
 
   const endRef = useRef<HTMLDivElement>(null);
   const isMountedRef = useRef(true);
@@ -135,6 +149,10 @@ export default function Chat() {
     // Cargar preferencia de idioma
     const savedLanguage = (localStorage.getItem("language") || "en") as "en" | "es";
     setLanguage(savedLanguage);
+    
+    // Cargar preferencia de modelo
+    const savedModel = (localStorage.getItem("model") || "hermes") as "hermes" | "hermes-mini";
+    setModel(savedModel);
     
     // Marcar que el componente está montado
     isMountedRef.current = true;
@@ -197,10 +215,11 @@ export default function Chat() {
       });
       if (res.ok && isMountedRef.current) {
         const msgs = await res.json();
-        // Agregar timestamps y IDs a los mensajes
-        const messagesWithMeta = msgs.map((msg: Message, idx: number) => ({
+        // Usar el _id del backend como id del mensaje
+        const messagesWithMeta = msgs.map((msg: any) => ({
           ...msg,
-          id: `${conv_id}_${idx}`,
+          id: msg._id,
+          rated: msg.rating || null,
           timestamp: msg.timestamp || Date.now()
         }));
         setMessages(messagesWithMeta);
@@ -299,12 +318,12 @@ export default function Chat() {
       const botMsg = createMessage("bot", t("writing"));
       const newMessages = [...prev, botMsg];
       const botIndex = newMessages.length - 1;
-      streamBotResponse(botIndex, messageToSend, targetConv as string, language);
+      streamBotResponse(botIndex, messageToSend, targetConv as string, language, model);
       return newMessages;
     });
   }
 
-  async function streamBotResponse(botIndex: number, userInput: string, convId: string, lang: "en" | "es") {
+  async function streamBotResponse(botIndex: number, userInput: string, convId: string, lang: "en" | "es", selectedModel: "hermes" | "hermes-mini") {
     try {
       setIsGenerating(true);
       // Crear un nuevo AbortController para esta solicitud
@@ -313,7 +332,7 @@ export default function Chat() {
       const res = await fetch("http://localhost:8000/chat/stream", {
         method: "POST",
         headers,
-        body: JSON.stringify({ message: userInput, conversation_id: convId, language: lang }),
+        body: JSON.stringify({ message: userInput, conversation_id: convId, language: lang, model: selectedModel }),
         signal: abortControllerRef.current.signal,
       });
 
@@ -364,9 +383,13 @@ export default function Chat() {
         }
       }
       
-      // Al terminar de contestar, recargamos el historial por si cambió el título
+      // Al terminar de contestar, recargamos el historial y los mensajes para obtener IDs de MongoDB
       if (isMountedRef.current) {
         loadConversations();
+        // Recargar mensajes para obtener los IDs reales de MongoDB
+        if (convId) {
+          await selectConversation(convId);
+        }
         setIsGenerating(false);
       }
     } catch (err: unknown) {
@@ -409,13 +432,40 @@ export default function Chat() {
     localStorage.setItem("darkMode", String(newDarkMode));
   };
 
-  const rateMessage = (messageId: string | undefined, rating: "up" | "down") => {
-    if (!messageId) return;
-    setMessages(prev =>
-      prev.map(msg =>
-        msg.id === messageId ? { ...msg, rated: msg.rated === rating ? null : rating } : msg
-      )
-    );
+  const rateMessage = async (messageId: string | undefined, rating: "up" | "down") => {
+    if (!messageId || !currentConv || !token) {
+      console.warn("No se puede hacer rating: messageId:", messageId, "currentConv:", currentConv, "token:", !!token);
+      return;
+    }
+    
+    try {
+      const url = `http://localhost:8000/conversations/${currentConv}/messages/${messageId}/rate`;
+      console.log("Enviando rating a:", url);
+      
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ rating })
+      });
+      
+      console.log("Respuesta del servidor:", res.status, res.statusText);
+      
+      if (res.ok) {
+        const data = await res.json();
+        console.log("Rating guardado:", data);
+        // Actualizar estado local con el nuevo rating
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === messageId ? { ...msg, rated: data.rating } : msg
+          )
+        );
+      } else {
+        const error = await res.text();
+        console.error("Error del servidor:", res.status, error);
+      }
+    } catch (err) {
+      console.error("Error en rateMessage:", err);
+    }
   };
 
   const stopStreaming = () => {
@@ -428,6 +478,11 @@ export default function Chat() {
   const toggleLanguage = (lang: "en" | "es") => {
     setLanguage(lang);
     localStorage.setItem("language", lang);
+  };
+
+  const selectModel = (selectedModel: "hermes" | "hermes-mini") => {
+    setModel(selectedModel);
+    localStorage.setItem("model", selectedModel);
   };
 
   return (
@@ -636,24 +691,83 @@ export default function Chat() {
                 </svg>
               </button>
             ) : (
-              <button
-                class={`p-3 rounded-2xl transition-all ${
-                  input.trim()
-                    ? darkMode
-                      ? "bg-teal-600 hover:bg-teal-500 text-white shadow-md"
-                      : "bg-teal-400 hover:bg-teal-500 text-white shadow-md"
-                    : darkMode
-                    ? "bg-slate-600 text-slate-400 cursor-not-allowed"
-                    : "bg-slate-100 text-slate-300 cursor-not-allowed"
-                }`}
-                onClick={sendMessage}
-                disabled={!input.trim()}
-                title={t("send")}
-              >
-                <svg class="w-6 h-6 rotate-90" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-                </svg>
-              </button>
+              <div class="flex gap-2">
+                <div class="relative">
+                  <button
+                    class={`p-3 rounded-2xl transition-all flex items-center justify-center ${
+                      darkMode
+                        ? "bg-slate-700 hover:bg-slate-600 text-slate-300"
+                        : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                    } shadow-md`}
+                    onClick={() => setShowModelSelector(!showModelSelector)}
+                    title={t("model")}
+                  >
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                    </svg>
+                  </button>
+                  {showModelSelector && (
+                    <div class={`absolute bottom-full mb-2 w-40 rounded-lg shadow-lg z-50 ${
+                      darkMode
+                        ? "bg-slate-700 border border-slate-600"
+                        : "bg-white border border-slate-200"
+                    }`}>
+                      <button
+                        onClick={() => {
+                          selectModel("hermes");
+                          setShowModelSelector(false);
+                        }}
+                        class={`w-full px-4 py-2 text-left text-sm rounded-t-lg transition-colors ${
+                          model === "hermes"
+                            ? darkMode
+                              ? "bg-teal-600 text-white"
+                              : "bg-teal-400 text-white"
+                            : darkMode
+                            ? "text-slate-200 hover:bg-slate-600"
+                            : "text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        ⚡ Hermes
+                      </button>
+                      <button
+                        onClick={() => {
+                          selectModel("hermes-mini");
+                          setShowModelSelector(false);
+                        }}
+                        class={`w-full px-4 py-2 text-left text-sm rounded-b-lg transition-colors ${
+                          model === "hermes-mini"
+                            ? darkMode
+                              ? "bg-teal-600 text-white"
+                              : "bg-teal-400 text-white"
+                            : darkMode
+                            ? "text-slate-200 hover:bg-slate-600"
+                            : "text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        ⚡ Hermes-mini
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <button
+                  class={`p-3 rounded-2xl transition-all ${
+                    input.trim()
+                      ? darkMode
+                        ? "bg-teal-600 hover:bg-teal-500 text-white shadow-md"
+                        : "bg-teal-400 hover:bg-teal-500 text-white shadow-md"
+                      : darkMode
+                      ? "bg-slate-600 text-slate-400 cursor-not-allowed"
+                      : "bg-slate-100 text-slate-300 cursor-not-allowed"
+                  }`}
+                  onClick={sendMessage}
+                  disabled={!input.trim()}
+                  title={t("send")}
+                >
+                  <svg class="w-6 h-6 rotate-90" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                  </svg>
+                </button>
+              </div>
             )}
           </div>
           <p class={`text-center text-[10px] mt-3 ${
@@ -709,6 +823,16 @@ export default function Chat() {
               onClick={() => window.location.href = "/stats"}
             >
               <span class="text-lg">📊</span> Stats
+            </button>
+            <button
+              class={`flex items-center justify-center gap-2 px-4 py-3 rounded-2xl shadow-md transition-all active:scale-95 font-medium text-sm whitespace-nowrap flex-shrink-0 ${
+                darkMode 
+                  ? "bg-blue-600 hover:bg-blue-500 text-white" 
+                  : "bg-blue-100 hover:bg-blue-200 text-blue-800"
+              }`}
+              onClick={() => window.location.href = "/vault"}
+            >
+              <span class="text-lg">�</span> Bóveda
             </button>
           </div>
         </div>

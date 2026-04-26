@@ -8,6 +8,7 @@ from datetime import datetime
 from bson import ObjectId
 import asyncio
 import logging
+import base64
 
 # Configurar logging para ver excepciones de socket
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +54,7 @@ class MessageRequest(BaseModel):
     conversation_id: str
     message: str
     language: str = "en"  # "en" o "es"
+    model: str = "hermes"  # "hermes" o "hermes-mini"
 
 class ProfileData(BaseModel):
     nome_completo: str | None = None
@@ -70,13 +72,19 @@ class MessageRating(BaseModel):
     conversation_id: str
     rating: str  # "up" o "down"
 
+class TagRequest(BaseModel):
+    tag: str
+    color: str = "#3b82f6"  # Color por defecto azul
+
 # ===============================
 # AUTENTICACIÓN
 # ===============================
 async def get_current_user(authorization: str = Header(...)):
     try:
         token = authorization.split(" ")[1]
-        user = users_collection.find_one({"email": token})
+        # Decodificar token Base64 para obtener el email
+        decoded_email = base64.b64decode(token).decode('utf-8')
+        user = users_collection.find_one({"email": decoded_email})
         if not user: 
             raise HTTPException(status_code=401, detail="Usuario no encontrado")
         return user
@@ -91,12 +99,16 @@ async def auth(user: UserAuth):
         if users_collection.find_one({"email": user.email}):
             raise HTTPException(status_code=400, detail="El usuario ya existe")
         users_collection.insert_one({"email": user.email, "password": user.password})
-        return {"access_token": user.email} 
+        # Generar token enmascarado con Base64
+        token = base64.b64encode(user.email.encode('utf-8')).decode('utf-8')
+        return {"access_token": token} 
     
     db_user = users_collection.find_one({"email": user.email, "password": user.password})
     if not db_user:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    return {"access_token": user.email}
+    # Generar token enmascarado con Base64
+    token = base64.b64encode(user.email.encode('utf-8')).decode('utf-8')
+    return {"access_token": token}
 
 # ===============================
 # GESTIÓN DE PERFILES DE USUARIO
@@ -147,6 +159,86 @@ async def update_profile(profile_data: ProfileData, current_user=Depends(get_cur
     return {"msg": "Perfil actualizado correctamente"}
 
 # ===============================
+# GESTIÓN DE TAGS/ETIQUETAS
+# ===============================
+@app.get("/tags")
+async def get_user_tags(current_user=Depends(get_current_user)):
+    """Obtener todas las etiquetas únicas del usuario"""
+    user_id = str(current_user["_id"])
+    convs = conversations_collection.find({"user_id": user_id})
+    
+    # Extraer todas las etiquetas únicas
+    tags_dict = {}
+    for conv in convs:
+        for tag in conv.get("tags", []):
+            tag_name = tag["name"]
+            if tag_name not in tags_dict:
+                tags_dict[tag_name] = tag.get("color", "#3b82f6")
+    
+    return [{"name": name, "color": color} for name, color in tags_dict.items()]
+
+@app.get("/vault")
+async def get_vault(current_user=Depends(get_current_user)):
+    """Obtener todas las conversaciones agrupadas por etiquetas"""
+    user_id = str(current_user["_id"])
+    convs = list(conversations_collection.find({"user_id": user_id}).sort("created_at", -1))
+    
+    # Agrupar por etiquetas
+    vault = {}
+    sin_tags = []
+    
+    for conv in convs:
+        tags = conv.get("tags", [])
+        conv_data = {
+            "conversation_id": str(conv["_id"]),
+            "title": conv.get("title", "Nueva sesión"),
+            "created_at": conv["created_at"].isoformat()
+        }
+        
+        if not tags:
+            sin_tags.append(conv_data)
+        else:
+            for tag in tags:
+                tag_name = tag["name"]
+                if tag_name not in vault:
+                    vault[tag_name] = {"color": tag.get("color", "#3b82f6"), "conversations": []}
+                vault[tag_name]["conversations"].append(conv_data)
+    
+    if sin_tags:
+        vault["Sin etiqueta"] = {"color": "#9ca3af", "conversations": sin_tags}
+    
+    return vault
+
+@app.post("/conversations/{conversation_id}/tags")
+async def add_tag(conversation_id: str, tag_req: TagRequest, current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    conv = conversations_collection.find_one({"_id": ObjectId(conversation_id), "user_id": user_id})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    
+    tag_obj = {"name": tag_req.tag, "color": tag_req.color}
+    # Evitar duplicados
+    if tag_obj not in conv.get("tags", []):
+        conversations_collection.update_one(
+            {"_id": ObjectId(conversation_id)},
+            {"$push": {"tags": tag_obj}}
+        )
+    return {"msg": "Etiqueta agregada"}
+
+@app.delete("/conversations/{conversation_id}/tags/{tag_name}")
+async def remove_tag(conversation_id: str, tag_name: str, current_user=Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    conv = conversations_collection.find_one({"_id": ObjectId(conversation_id), "user_id": user_id})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    
+    conversations_collection.update_one(
+        {"_id": ObjectId(conversation_id)},
+        {"$pull": {"tags": {"name": tag_name}}}
+    )
+    return {"msg": "Etiqueta eliminada"}
+
+# ===============================
 # GESTIÓN DE CONVERSACIONES
 # ===============================
 @app.post("/conversations")
@@ -154,14 +246,15 @@ async def create_conv(current_user=Depends(get_current_user)):
     res = conversations_collection.insert_one({
         "user_id": str(current_user["_id"]),
         "title": "Nueva sesión",
-        "created_at": datetime.now()
+        "created_at": datetime.now(),
+        "tags": []
     })
     return {"conversation_id": str(res.inserted_id)}
 
 @app.get("/conversations")
 async def get_conversations(current_user=Depends(get_current_user)):
     convs = conversations_collection.find({"user_id": str(current_user["_id"])}).sort("created_at", -1)
-    return [{"conversation_id": str(c["_id"]), "title": c.get("title", "Nueva sesión")} for c in convs]
+    return [{"conversation_id": str(c["_id"]), "title": c.get("title", "Nueva sesión"), "tags": c.get("tags", [])} for c in convs]
 
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, current_user=Depends(get_current_user)):
@@ -178,7 +271,7 @@ async def get_messages(conversation_id: str, current_user=Depends(get_current_us
         "conversation_id": conversation_id, 
         "user_id": str(current_user["_id"])
     }).sort("timestamp", 1)
-    return [{"role": m.get("role"), "content": m.get("content")} for m in msgs]
+    return [{"_id": str(m.get("_id")), "role": m.get("role"), "content": m.get("content"), "rating": m.get("rating", None)} for m in msgs]
 
 @app.post("/chat/stream")
 async def chat_stream(request: MessageRequest, current_user=Depends(get_current_user)):
@@ -188,7 +281,8 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
         "user_id": str(current_user["_id"]),
         "role": "user",
         "content": request.message,
-        "timestamp": datetime.now()
+        "timestamp": datetime.now(),
+        "rating": None
     })
 
     # Si es el primer mensaje, actualizamos el título de la conversación
@@ -256,7 +350,7 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
         )
         accumulated = ""
         try:
-            for chunk in ollama.generate(model=MODEL_NAME, prompt=full_prompt, stream=True):
+            for chunk in ollama.generate(model=request.model, prompt=full_prompt, stream=True):
                 content = chunk['response']
                 accumulated += content
                 try:
@@ -283,7 +377,8 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
                         "user_id": str(current_user["_id"]),
                         "role": "bot",
                         "content": accumulated,
-                        "timestamp": datetime.now()
+                        "timestamp": datetime.now(),
+                        "rating": None
                     })
                 except Exception as db_err:
                     logger.error(f"Error guardando mensaje en BD: {str(db_err)}")
@@ -297,7 +392,8 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
                     "user_id": str(current_user["_id"]),
                     "role": "bot",
                     "content": accumulated,
-                    "timestamp": datetime.now()
+                    "timestamp": datetime.now(),
+                    "rating": None
                 })
             except Exception as e:
                 logger.error(f"Error guardando respuesta en BD: {str(e)}")
@@ -307,29 +403,37 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
 # ===============================
 # RATING DE MENSAJES
 # ===============================
-@app.post("/messages/rate")
-async def rate_message(rating: MessageRating, current_user=Depends(get_current_user)):
+class RatingUpdate(BaseModel):
+    rating: str  # "up" o "down"
+
+@app.post("/conversations/{conversation_id}/messages/{message_id}/rate")
+async def rate_message(conversation_id: str, message_id: str, rating_update: RatingUpdate, current_user=Depends(get_current_user)):
     try:
-        ratings_collection.update_one(
-            {
-                "user_id": str(current_user["_id"]),
-                "conversation_id": rating.conversation_id,
-                "message_id": rating.message_id
-            },
-            {
-                "$set": {
-                    "user_id": str(current_user["_id"]),
-                    "conversation_id": rating.conversation_id,
-                    "message_id": rating.message_id,
-                    "rating": rating.rating,
-                    "timestamp": datetime.now()
-                }
-            },
-            upsert=True
+        rating_value = rating_update.rating
+        
+        # Validar que el mensaje pertenece al usuario
+        msg = messages_collection.find_one({
+            "_id": ObjectId(message_id),
+            "user_id": str(current_user["_id"]),
+            "conversation_id": conversation_id
+        })
+        
+        if not msg:
+            raise HTTPException(status_code=404, detail="Mensaje no encontrado")
+        
+        # Toggle del rating: si ya tiene ese rating, lo elimina (None); si no, lo asigna
+        new_rating = rating_value if msg.get("rating") != rating_value else None
+        messages_collection.update_one(
+            {"_id": ObjectId(message_id)},
+            {"$set": {"rating": new_rating}}
         )
-        return {"msg": "Rating guardado"}
+        
+        return {"msg": "Rating guardado", "rating": new_rating}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error guardando rating: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error al guardar el rating")
         raise HTTPException(status_code=500, detail="Error al guardar el rating")
 
 # ===============================
