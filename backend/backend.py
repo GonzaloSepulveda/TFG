@@ -98,17 +98,18 @@ async def auth(user: UserAuth):
     if user.isRegister:
         if users_collection.find_one({"email": user.email}):
             raise HTTPException(status_code=400, detail="El usuario ya existe")
-        users_collection.insert_one({"email": user.email, "password": user.password})
+        users_collection.insert_one({"email": user.email, "password": user.password, "admin": False})
         # Generar token enmascarado con Base64
         token = base64.b64encode(user.email.encode('utf-8')).decode('utf-8')
-        return {"access_token": token} 
+        return {"access_token": token, "admin": False} 
     
     db_user = users_collection.find_one({"email": user.email, "password": user.password})
     if not db_user:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     # Generar token enmascarado con Base64
     token = base64.b64encode(user.email.encode('utf-8')).decode('utf-8')
-    return {"access_token": token}
+    admin = db_user.get("admin", False)
+    return {"access_token": token, "admin": admin}
 
 # ===============================
 # GESTIÓN DE PERFILES DE USUARIO
@@ -256,6 +257,14 @@ async def get_conversations(current_user=Depends(get_current_user)):
     convs = conversations_collection.find({"user_id": str(current_user["_id"])}).sort("created_at", -1)
     return [{"conversation_id": str(c["_id"]), "title": c.get("title", "Nueva sesión"), "tags": c.get("tags", [])} for c in convs]
 
+@app.get("/conversations/all")
+async def get_all_conversations(current_user=Depends(get_current_user)):
+    # Solo admins pueden ver todas las conversaciones
+    if not current_user.get("admin", False):
+        raise HTTPException(status_code=403, detail="No tienes permisos para acceder a este recurso")
+    convs = conversations_collection.find().sort("created_at", -1)
+    return [{"conversation_id": str(c["_id"]), "title": c.get("title", "Nueva sesión"), "user_id": c.get("user_id"), "created_at": c.get("created_at"), "tags": c.get("tags", [])} for c in convs]
+
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, current_user=Depends(get_current_user)):
     conversations_collection.delete_one({"_id": ObjectId(conversation_id), "user_id": str(current_user["_id"])})
@@ -267,11 +276,17 @@ async def delete_conversation(conversation_id: str, current_user=Depends(get_cur
 # ===============================
 @app.get("/conversations/{conversation_id}/messages")
 async def get_messages(conversation_id: str, current_user=Depends(get_current_user)):
-    msgs = messages_collection.find({
-        "conversation_id": conversation_id, 
-        "user_id": str(current_user["_id"])
-    }).sort("timestamp", 1)
-    return [{"_id": str(m.get("_id")), "role": m.get("role"), "content": m.get("content"), "rating": m.get("rating", None)} for m in msgs]
+    # Admins pueden ver mensajes de cualquier conversación, usuarios solo sus propias
+    if current_user.get("admin", False):
+        msgs = messages_collection.find({
+            "conversation_id": conversation_id
+        }).sort("timestamp", 1)
+    else:
+        msgs = messages_collection.find({
+            "conversation_id": conversation_id, 
+            "user_id": str(current_user["_id"])
+        }).sort("timestamp", 1)
+    return [{"_id": str(m.get("_id")), "role": m.get("role"), "content": m.get("content"), "rating": m.get("rating", None), "timestamp": m.get("timestamp")} for m in msgs]
 
 @app.post("/chat/stream")
 async def chat_stream(request: MessageRequest, current_user=Depends(get_current_user)):

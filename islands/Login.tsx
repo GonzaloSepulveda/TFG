@@ -16,7 +16,8 @@ export default function Login() {
     if (res.ok) {
       const data = await res.json();
       localStorage.setItem("token", data.access_token);
-      window.location.href = "/chat"; // Redirección de Fresh
+      localStorage.setItem("admin", data.admin ? "true" : "false");
+      window.location.href = data.admin ? "/dashboard" : "/chat";
     } else {
       alert("Error en el acceso");
     }

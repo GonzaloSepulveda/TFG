@@ -92,7 +92,7 @@ export default function Chat() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [language, setLanguage] = useState<"en" | "es">("en");
-  const [model, setModel] = useState<"hermes" | "hermes-mini">("hermes");
+  const [model, setModel] = useState<"hermes" | "hermes-mini" | "hermes2">("hermes");
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [currentTags, setCurrentTags] = useState<Tag[]>([]);
   const [newTagName, setNewTagName] = useState("");
@@ -151,7 +151,7 @@ export default function Chat() {
     setLanguage(savedLanguage);
     
     // Cargar preferencia de modelo
-    const savedModel = (localStorage.getItem("model") || "hermes") as "hermes" | "hermes-mini";
+    const savedModel = (localStorage.getItem("model") || "hermes") as "hermes" | "hermes-mini" | "hermes2";
     setModel(savedModel);
     
     // Marcar que el componente está montado
@@ -323,7 +323,7 @@ export default function Chat() {
     });
   }
 
-  async function streamBotResponse(botIndex: number, userInput: string, convId: string, lang: "en" | "es", selectedModel: "hermes" | "hermes-mini") {
+  async function streamBotResponse(botIndex: number, userInput: string, convId: string, lang: "en" | "es", selectedModel: "hermes" | "hermes-mini" | "hermes2") {
     try {
       setIsGenerating(true);
       // Crear un nuevo AbortController para esta solicitud
@@ -480,7 +480,7 @@ export default function Chat() {
     localStorage.setItem("language", lang);
   };
 
-  const selectModel = (selectedModel: "hermes" | "hermes-mini") => {
+  const selectModel = (selectedModel: "hermes" | "hermes-mini" | "hermes2") => {
     setModel(selectedModel);
     localStorage.setItem("model", selectedModel);
   };
@@ -734,7 +734,7 @@ export default function Chat() {
                           selectModel("hermes-mini");
                           setShowModelSelector(false);
                         }}
-                        class={`w-full px-4 py-2 text-left text-sm rounded-b-lg transition-colors ${
+                        class={`w-full px-4 py-2 text-left text-sm transition-colors ${
                           model === "hermes-mini"
                             ? darkMode
                               ? "bg-teal-600 text-white"
@@ -745,6 +745,23 @@ export default function Chat() {
                         }`}
                       >
                         ⚡ Hermes-mini
+                      </button>
+                      <button
+                        onClick={() => {
+                          selectModel("hermes2");
+                          setShowModelSelector(false);
+                        }}
+                        class={`w-full px-4 py-2 text-left text-sm rounded-b-lg transition-colors ${
+                          model === "hermes2"
+                            ? darkMode
+                              ? "bg-teal-600 text-white"
+                              : "bg-teal-400 text-white"
+                            : darkMode
+                            ? "text-slate-200 hover:bg-slate-600"
+                            : "text-slate-700 hover:bg-slate-100"
+                        }`}
+                      >
+                        ⚡ Hermes2
                       </button>
                     </div>
                   )}
