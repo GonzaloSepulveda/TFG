@@ -34,6 +34,7 @@ const translations = {
     new: "New",
     profile: "Profile",
     stats: "Stats",
+    vault: "Vault",
     search: "Search...",
     history: "History",
     signOut: "Sign out",
@@ -62,6 +63,7 @@ const translations = {
     new: "Nueva",
     profile: "Perfil",
     stats: "Stats",
+    vault: "Bóveda",
     search: "Buscar...",
     history: "Historial",
     signOut: "Cerrar sesión",
@@ -849,7 +851,7 @@ export default function Chat() {
               }`}
               onClick={() => window.location.href = "/vault"}
             >
-              <span class="text-lg">�</span> Bóveda
+              <span class="text-lg">💬</span> {t("vault")}
             </button>
           </div>
         </div>

@@ -160,6 +160,38 @@ async def update_profile(profile_data: ProfileData, current_user=Depends(get_cur
     return {"msg": "Perfil actualizado correctamente"}
 
 # ===============================
+# ELIMINAR CUENTA
+# ===============================
+@app.delete("/account")
+async def delete_account(current_user=Depends(get_current_user)):
+    """Eliminar la cuenta del usuario y todos sus datos asociados"""
+    user_id = str(current_user["_id"])
+    
+    try:
+        # Eliminar usuario de la colección users
+        users_collection.delete_one({"_id": ObjectId(user_id)})
+        
+        # Eliminar todas las conversaciones del usuario
+        conversations_collection.delete_many({"user_id": user_id})
+        
+        # Eliminar todos los mensajes del usuario
+        messages_collection.delete_many({"user_id": user_id})
+        
+        # Eliminar todos los ratings del usuario
+        ratings_collection.delete_many({"user_id": user_id})
+        
+        # Eliminar el perfil del usuario
+        profiles_collection.delete_one({"user_id": user_id})
+        
+        # Eliminar las estadísticas del usuario
+        stats_collection.delete_one({"user_id": user_id})
+        
+        return {"msg": "Cuenta eliminada correctamente"}
+    except Exception as e:
+        logger.error(f"Error al eliminar cuenta: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al eliminar la cuenta: {str(e)}")
+
+# ===============================
 # GESTIÓN DE TAGS/ETIQUETAS
 # ===============================
 @app.get("/tags")

@@ -31,6 +31,10 @@ export default function Profile() {
   const [photoPreview, setPhotoPreview] = useState("");
   const [darkMode, setDarkMode] = useState(false);
 
+  // Nuevos estados para el modal de eliminación
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteStep, setDeleteStep] = useState(1);
+
   useEffect(() => {
     const t = localStorage.getItem("token");
     if (!t) {
@@ -114,8 +118,55 @@ export default function Profile() {
     }
   };
 
+  // Funciones para manejar el nuevo modal
+  const openDeleteModal = () => {
+    setDeleteStep(1);
+    setShowDeleteModal(true);
+  };
+
+  const closeDeleteModal = () => {
+    setShowDeleteModal(false);
+    setDeleteStep(1);
+  };
+
+  const handleConfirmDeleteStep = () => {
+    if (deleteStep === 1) {
+      setDeleteStep(2); // Pasamos a la segunda advertencia
+    } else {
+      executeDelete(); // Si ya estamos en el paso 2, ejecutamos el borrado
+    }
+  };
+
+  const executeDelete = async () => {
+    try {
+      setSaving(true);
+      setShowDeleteModal(false); // Cerramos el modal mientras carga
+      const res = await fetch("http://localhost:8000/account", {
+        method: "DELETE",
+        headers,
+      });
+
+      if (res.ok) {
+        setMessage("✅ Cuenta eliminada correctamente. Redirigiendo...");
+        localStorage.removeItem("token");
+        localStorage.removeItem("darkMode");
+        localStorage.removeItem("language");
+        localStorage.removeItem("model");
+        setTimeout(() => {
+          window.location.href = "/";
+        }, 2000);
+      } else {
+        setMessage("❌ Error al eliminar la cuenta. Intenta más tarde.");
+        setSaving(false);
+      }
+    } catch (err) {
+      setMessage("❌ Error de conexión. Intenta más tarde.");
+      setSaving(false);
+    }
+  };
+
   return (
-    <div class={`min-h-screen transition-colors ${
+    <div class={`min-h-screen transition-colors relative ${
       darkMode
         ? "bg-gradient-to-br from-slate-900 to-slate-800"
         : "bg-gradient-to-br from-blue-50 to-green-50"
@@ -379,8 +430,72 @@ export default function Profile() {
           }`}>
             Estos datos ayudan a Hermes a personalizar su apoyo y comprensión hacia ti.
           </p>
+
+          {/* Delete Account Button */}
+          <button
+            onClick={openDeleteModal}
+            disabled={saving}
+            class={`w-full py-3 rounded-2xl font-bold text-white transition-all shadow-lg mt-8 border-2 ${
+              saving
+                ? "bg-slate-400 border-slate-400 cursor-not-allowed"
+                : "bg-red-600 hover:bg-red-700 border-red-700 active:scale-95"
+            }`}
+          >
+            🗑️ Eliminar cuenta
+          </button>
+          <p class={`text-center text-xs mt-2 ${
+            darkMode ? "text-red-400" : "text-red-500"
+          }`}>
+            Esta acción es permanente e irreversible
+          </p>
         </div>
       </div>
+
+      {/* Modal Personalizado de Eliminación */}
+      {showDeleteModal && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div class={`max-w-md w-full p-6 rounded-3xl shadow-2xl ${
+            darkMode ? "bg-slate-800 text-slate-100 border border-slate-700" : "bg-white text-slate-800"
+          }`}>
+            <h2 class={`text-2xl font-bold mb-4 flex items-center gap-2 ${darkMode ? "text-red-400" : "text-red-600"}`}>
+              ⚠️ Advertencia
+            </h2>
+            
+            {deleteStep === 1 ? (
+              <p class="mb-6 opacity-90">
+                ¿Estás completamente seguro? Esta acción eliminará tu cuenta y <strong>TODOS</strong> tus datos (conversaciones, perfil, tags, etc.) de forma permanente e irreversible.
+              </p>
+            ) : (
+              <p class="mb-6 font-semibold">
+                Esta es tu última oportunidad. ¿Estás seguro de que deseas eliminar la cuenta de forma definitiva?
+              </p>
+            )}
+
+            <div class="flex gap-3 mt-8">
+              <button
+                onClick={closeDeleteModal}
+                class={`flex-1 py-3 px-4 rounded-xl font-medium transition-colors ${
+                  darkMode
+                    ? "bg-slate-700 hover:bg-slate-600 text-slate-200"
+                    : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                }`}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleConfirmDeleteStep}
+                class={`flex-1 py-3 px-4 rounded-xl font-bold text-white transition-all shadow-md active:scale-95 ${
+                  deleteStep === 1
+                    ? "bg-red-500 hover:bg-red-600"
+                    : "bg-red-700 hover:bg-red-800 animate-pulse"
+                }`}
+              >
+                {deleteStep === 1 ? "Sí, eliminar" : "Sí, estoy seguro"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -276,6 +276,17 @@ export default function Vault() {
                           </div>
                           <div class="flex items-center gap-2">
                             <button
+                              onClick={() => removeTagFromConversation(conv.conversation_id, tagName)}
+                              class={`px-2 py-1 rounded text-sm transition-colors opacity-0 group-hover:opacity-100 ${
+                                darkMode
+                                  ? "bg-red-600/50 hover:bg-red-600 text-red-100"
+                                  : "bg-red-100 hover:bg-red-200 text-red-700"
+                              }`}
+                              title="Eliminar etiqueta"
+                            >
+                              ✕
+                            </button>
+                            <button
                               onClick={() => setShowAssignTag(conv.conversation_id)}
                               class={`px-3 py-1 rounded text-sm transition-colors opacity-0 group-hover:opacity-100 ${
                                 darkMode
