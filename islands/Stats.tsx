@@ -5,8 +5,8 @@ interface UserStats {
   total_messages: number;
   user_messages: number;
   bot_messages: number;
-  positive_ratings: number;
-  negative_ratings: number;
+  liked_messages: number;
+  disliked_messages: number;
   satisfaction_rate: number;
 }
 
@@ -203,12 +203,12 @@ export default function Stats() {
                   </p>
                   <div class="mt-2 flex gap-4">
                     <div>
-                      <p class="text-2xl font-bold text-green-500">👍 {stats.positive_ratings}</p>
-                      <p class={`text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Útil</p>
+                      <p class="text-2xl font-bold text-green-500">👍 {stats.liked_messages}</p>
+                      <p class={`text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Me gusta</p>
                     </div>
                     <div>
-                      <p class="text-2xl font-bold text-red-500">👎 {stats.negative_ratings}</p>
-                      <p class={`text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>No útil</p>
+                      <p class="text-2xl font-bold text-red-500">👎 {stats.disliked_messages}</p>
+                      <p class={`text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>No me gusta</p>
                     </div>
                   </div>
                 </div>

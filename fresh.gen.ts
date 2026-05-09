@@ -4,6 +4,7 @@
 
 import * as $_404 from "./routes/_404.tsx";
 import * as $_app from "./routes/_app.tsx";
+import * as $analysis from "./routes/analysis.tsx";
 import * as $api_joke from "./routes/api/joke.ts";
 import * as $chat from "./routes/chat.tsx";
 import * as $dashboard from "./routes/dashboard.tsx";
@@ -14,6 +15,7 @@ import * as $stats from "./routes/stats.tsx";
 import * as $vault from "./routes/vault.tsx";
 import * as $Chat from "./islands/Chat.tsx";
 import * as $Dashboard from "./islands/Dashboard.tsx";
+import * as $DisorderAnalysis from "./islands/DisorderAnalysis.tsx";
 import * as $Login from "./islands/Login.tsx";
 import * as $Profile from "./islands/Profile.tsx";
 import * as $Stats from "./islands/Stats.tsx";
@@ -24,6 +26,7 @@ const manifest = {
   routes: {
     "./routes/_404.tsx": $_404,
     "./routes/_app.tsx": $_app,
+    "./routes/analysis.tsx": $analysis,
     "./routes/api/joke.ts": $api_joke,
     "./routes/chat.tsx": $chat,
     "./routes/dashboard.tsx": $dashboard,
@@ -36,6 +39,7 @@ const manifest = {
   islands: {
     "./islands/Chat.tsx": $Chat,
     "./islands/Dashboard.tsx": $Dashboard,
+    "./islands/DisorderAnalysis.tsx": $DisorderAnalysis,
     "./islands/Login.tsx": $Login,
     "./islands/Profile.tsx": $Profile,
     "./islands/Stats.tsx": $Stats,

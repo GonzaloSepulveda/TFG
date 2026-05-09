@@ -76,6 +76,17 @@ class TagRequest(BaseModel):
     tag: str
     color: str = "#3b82f6"  # Color por defecto azul
 
+class DisorderAnalysisRequest(BaseModel):
+    language: str = "en"  # "en" o "es"
+    model: str = "hermes"
+
+class DisorderAnalysisResponse(BaseModel):
+    overall_assessment: str
+    detected_patterns: list[str]
+    possible_disorders: list[dict]  # {"name": str, "confidence": str, "indicators": list}
+    recommendations: list[str]
+    analysis_date: str
+
 # ===============================
 # AUTENTICACIÓN
 # ===============================
@@ -348,15 +359,9 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
     }).sort("timestamp", -1).limit(5))
     
     # Excluir el último mensaje (el que acabo de guardar) del contexto histórico
-    # Así el mensaje actual queda separado y no se mezcla con el patrón del diálogo
     if historial_raw:
         historial_raw = historial_raw[1:]  # Saltamos el más reciente
     
-    contexto_str = ""
-    for msg in reversed(historial_raw):
-        rol = "Usuario" if msg["role"] == "user" else "Hermes"
-        contexto_str += f"{rol}: {msg['content']}\n"
-
     # Cargar perfil del usuario para personalizar la respuesta
     profile = profiles_collection.find_one({"user_id": str(current_user["_id"])})
     profile_context = ""
@@ -381,24 +386,38 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
             parts.append(f"- Objetivos de bienestar: {profile.get('objetivos_bienestar')}")
         
         if parts:
-            profile_context = f"\nInformación del usuario:\n" + "\n".join(parts)
+            profile_context = f"Información del usuario:\n" + "\n".join(parts)
+
+    # 1. Construir el prompt del sistema
+    system_prompt = get_system_prompt(request.language)
+    if profile_context:
+        system_prompt += f"\n{profile_context}"
+
+    # 2. Inicializar el array de mensajes estructurados
+    mensajes_estructurados = [
+        {"role": "system", "content": system_prompt}
+    ]
+
+    # 3. Añadir el historial (mapeando "bot" a "assistant" para Ollama)
+    for msg in reversed(historial_raw):
+        role_ollama = "assistant" if msg["role"] == "bot" else "user"
+        mensajes_estructurados.append({
+            "role": role_ollama,
+            "content": msg["content"]
+        })
+
+    # 4. Añadir el mensaje actual del usuario
+    mensajes_estructurados.append({
+        "role": "user",
+        "content": request.message
+    })
 
     async def generator():
-        # Obtener el system prompt según el idioma seleccionado
-        system_prompt = get_system_prompt(request.language)
-        
-        # Construir prompt sin separadores explícitos para evitar que el modelo los reproduzca
-        full_prompt = (
-            f"{system_prompt}"
-            f"{profile_context}"
-            f"\n\nRecent history:\n{contexto_str}"
-            f"User: {request.message}\n"
-            f"Hermes: "
-        )
         accumulated = ""
         try:
-            for chunk in ollama.generate(model=request.model, prompt=full_prompt, stream=True):
-                content = chunk['response']
+            # Usar ollama.chat en lugar de generate para mantener el contexto de chat
+            for chunk in ollama.chat(model=request.model, messages=mensajes_estructurados, stream=True):
+                content = chunk['message']['content']
                 accumulated += content
                 try:
                     yield content
@@ -451,12 +470,15 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
 # RATING DE MENSAJES
 # ===============================
 class RatingUpdate(BaseModel):
-    rating: str  # "up" o "down"
+    rating: str  # "liked", "disliked" o None
 
 @app.post("/conversations/{conversation_id}/messages/{message_id}/rate")
 async def rate_message(conversation_id: str, message_id: str, rating_update: RatingUpdate, current_user=Depends(get_current_user)):
     try:
         rating_value = rating_update.rating
+        
+        # Normalizar valores antiguos (up/down) a nuevos (liked/disliked)
+        
         
         # Validar que el mensaje pertenece al usuario
         msg = messages_collection.find_one({
@@ -467,6 +489,10 @@ async def rate_message(conversation_id: str, message_id: str, rating_update: Rat
         
         if not msg:
             raise HTTPException(status_code=404, detail="Mensaje no encontrado")
+        
+        # Solo se puede dar rating a mensajes del bot
+        if msg.get("role") != "bot":
+            raise HTTPException(status_code=400, detail="Solo se puede dar rating a respuestas del bot")
         
         # Toggle del rating: si ya tiene ese rating, lo elimina (None); si no, lo asigna
         new_rating = rating_value if msg.get("rating") != rating_value else None
@@ -480,7 +506,6 @@ async def rate_message(conversation_id: str, message_id: str, rating_update: Rat
         raise
     except Exception as e:
         logger.error(f"Error guardando rating: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error al guardar el rating")
         raise HTTPException(status_code=500, detail="Error al guardar el rating")
 
 # ===============================
@@ -500,18 +525,23 @@ async def get_user_stats(current_user=Depends(get_current_user)):
     user_messages = messages_collection.count_documents({"user_id": user_id, "role": "user"})
     bot_messages = messages_collection.count_documents({"user_id": user_id, "role": "bot"})
     
-    # Ratings positivos y negativos
-    positive_ratings = ratings_collection.count_documents({"user_id": user_id, "rating": "up"})
-    negative_ratings = ratings_collection.count_documents({"user_id": user_id, "rating": "down"})
+    # CORRECCIÓN 1: Buscar los ratings en 'messages_collection' en lugar de 'ratings_collection'
+    # CORRECCIÓN 2: Renombrar a 'liked_messages' y 'disliked_messages' para que encaje con Preact
+    liked_messages = messages_collection.count_documents({"user_id": user_id, "rating": "up"})
+    disliked_messages = messages_collection.count_documents({"user_id": user_id, "rating": "down"})
+    
+    # Calcular porcentaje de satisfacción
+    total_ratings = liked_messages + disliked_messages
+    satisfaction_rate = round((liked_messages / total_ratings * 100), 1) if total_ratings > 0 else 0
     
     return {
         "total_conversations": total_conversations,
         "total_messages": total_messages,
         "user_messages": user_messages,
         "bot_messages": bot_messages,
-        "positive_ratings": positive_ratings,
-        "negative_ratings": negative_ratings,
-        "satisfaction_rate": round((positive_ratings / (positive_ratings + negative_ratings) * 100), 1) if (positive_ratings + negative_ratings) > 0 else 0
+        "liked_messages": liked_messages,
+        "disliked_messages": disliked_messages,
+        "satisfaction_rate": satisfaction_rate
     }
 
 @app.get("/conversations/{conversation_id}/stats")
@@ -543,10 +573,266 @@ async def get_conversation_stats(conversation_id: str, current_user=Depends(get_
     # Total de mensajes
     total_msgs = messages_collection.count_documents({"conversation_id": conversation_id, "user_id": user_id})
     
+    # Likes y dislikes en esta conversación
+    liked_msgs = messages_collection.count_documents({"conversation_id": conversation_id, "user_id": user_id, "role": "bot", "rating": "liked"})
+    disliked_msgs = messages_collection.count_documents({"conversation_id": conversation_id, "user_id": user_id, "role": "bot", "rating": "disliked"})
+    
+    # Satisfacción en esta conversación
+    total_rated = liked_msgs + disliked_msgs
+    satisfaction = round((liked_msgs / total_rated * 100), 1) if total_rated > 0 else 0
+    
     return {
         "title": conv.get("title", "Nueva sesión"),
         "created_at": conv.get("created_at"),
         "total_messages": total_msgs,
         "duration_minutes": round(duration, 1),
-        "last_message_at": last_message.get("timestamp") if last_message else None
+        "last_message_at": last_message.get("timestamp") if last_message else None,
+        "liked_messages": liked_msgs,
+        "disliked_messages": disliked_msgs,
+        "satisfaction_rate": satisfaction
     }
+
+# ===============================
+# ANÁLISIS DE TRASTORNOS CON IA
+# ===============================
+@app.post("/disorder-analysis")
+async def analyze_disorders(request: DisorderAnalysisRequest, current_user=Depends(get_current_user)):
+    """
+    Analiza las conversaciones del usuario para detectar posibles trastornos
+    usando el modelo Hermes.
+    """
+    user_id = str(current_user["_id"])
+    
+    try:
+        # Obtener todos los mensajes del usuario
+        all_messages = list(messages_collection.find({
+            "user_id": user_id
+        }).sort("timestamp", 1))
+        
+        if not all_messages:
+            return {
+                "overall_assessment": "Sin datos suficientes para análisis",
+                "detected_patterns": [],
+                "possible_disorders": [],
+                "recommendations": ["Mantén conversaciones regulares con Hermes para un análisis más preciso"],
+                "analysis_date": datetime.now().isoformat()
+            }
+        
+        # Construir contexto con los mensajes del usuario
+        user_messages = [msg["content"] for msg in all_messages if msg["role"] == "user"]
+        conversation_context = "\n".join([f"Usuario: {msg}" for msg in user_messages[-50:]])  # Últimos 50 mensajes
+        
+        # Prompt especializado en análisis psicológico
+        analysis_prompt = f"""Eres un asistente psicológico especializado en análisis de patrones de comportamiento y síntomas.
+        
+Analiza las siguientes expresiones del usuario y proporciona un análisis estructurado sobre posibles trastornos o condiciones mentales.
+
+CONVERSACIONES DEL USUARIO:
+{conversation_context}
+
+Por favor, proporciona tu análisis en el siguiente formato JSON exactamente:
+{{
+    "overall_assessment": "Una evaluación general breve sobre el estado emocional del usuario",
+    "detected_patterns": ["patrón 1", "patrón 2", ...],
+    "possible_disorders": [
+        {{
+            "name": "nombre del trastorno (ej: Depresión, Ansiedad)",
+            "confidence": "Alta/Media/Baja",
+            "indicators": ["indicador 1", "indicador 2", ...]
+        }},
+        ...
+    ],
+    "recommendations": ["recomendación 1", "recomendación 2", ...]
+}}
+
+IMPORTANTE:
+- Sé empático y profesional
+- No hagas diagnósticos definitivos, solo sugerencias basadas en patrones
+- Siempre recomienda buscar ayuda profesional si detectas riesgo grave
+- Responde SOLO en JSON válido sin texto adicional
+- Si no hay datos suficientes, deja los arrays vacíos"""
+
+        # Llamar al LLM
+        response = ollama.generate(
+            model=request.model,
+            prompt=analysis_prompt,
+            stream=False
+        )
+        
+        # Procesar la respuesta
+        import json
+        response_text = response.get("response", "").strip()
+        
+        # Intentar extraer JSON si está envuelto en markdown
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
+        analysis_data = json.loads(response_text)
+        
+        # Asegurar que tiene la estructura correcta
+        return {
+            "overall_assessment": analysis_data.get("overall_assessment", ""),
+            "detected_patterns": analysis_data.get("detected_patterns", []),
+            "possible_disorders": analysis_data.get("possible_disorders", []),
+            "recommendations": analysis_data.get("recommendations", []),
+            "analysis_date": datetime.now().isoformat()
+        }
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Error al parsear JSON del análisis: {str(e)}")
+        return {
+            "overall_assessment": "Error al procesar el análisis. Por favor, intenta de nuevo.",
+            "detected_patterns": [],
+            "possible_disorders": [],
+            "recommendations": [],
+            "analysis_date": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error en análisis de trastornos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en análisis: {str(e)}")
+
+@app.get("/admin/disorders-analysis")
+async def analyze_all_disorders(current_user=Depends(get_current_user)):
+    """
+    Solo para admins: Analiza todos los usuarios y retorna análisis de trastornos con progreso.
+    Usa procesamiento paralelo para acelerar el análisis.
+    """
+    # Verificar permisos de admin
+    if not current_user.get("admin", False):
+        raise HTTPException(status_code=403, detail="No tienes permisos para acceder a este recurso")
+    
+    try:
+        import json
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+        
+        logger.info("🔍 Iniciando análisis de trastornos para todos los usuarios")
+        
+        # Obtener todos los usuarios
+        all_users = list(users_collection.find({}))
+        logger.info(f"📊 Total de usuarios encontrados: {len(all_users)}")
+        
+        all_analysis = []
+        
+        def analyze_user(user):
+            """Función para analizar un único usuario"""
+            try:
+                user_id = str(user["_id"])
+                user_email = user.get("email", "desconocido")
+                logger.info(f"👤 Analizando usuario: {user_email}")
+                
+                # Obtener mensajes del usuario
+                user_messages = list(messages_collection.find({
+                    "user_id": user_id
+                }).sort("timestamp", 1))
+                
+                logger.info(f"   → {user_email} tiene {len(user_messages)} mensajes totales")
+                
+                if not user_messages:
+                    logger.info(f"   ⏭️  {user_email} sin mensajes, saltando...")
+                    return None  # Saltar usuarios sin mensajes
+                
+                # Construir contexto
+                user_msgs = [msg["content"] for msg in user_messages if msg["role"] == "user"]
+                if not user_msgs:
+                    logger.info(f"   ⏭️  {user_email} sin mensajes de usuario, saltando...")
+                    return None
+                
+                logger.info(f"   📝 Preparando contexto con {len(user_msgs[-20:])} últimos mensajes")
+                conversation_context = "\n".join([f"Usuario: {msg}" for msg in user_msgs[-20:]])
+                
+                # Prompt para análisis
+                analysis_prompt = f"""Eres un asistente psicológico especializado en análisis de patrones de comportamiento y síntomas.
+        
+Analiza las siguientes expresiones del usuario y proporciona un análisis estructurado sobre posibles trastornos o condiciones mentales.
+
+CONVERSACIONES DEL USUARIO:
+{conversation_context}
+
+Por favor, proporciona tu análisis en el siguiente formato JSON exactamente:
+{{
+    "overall_assessment": "Una evaluación general breve sobre el estado emocional del usuario",
+    "detected_patterns": ["patrón 1", "patrón 2", ...],
+    "possible_disorders": [
+        {{
+            "name": "nombre del trastorno (ej: Depresión, Ansiedad)",
+            "confidence": "Alta/Media/Baja",
+            "indicators": ["indicador 1", "indicador 2", ...]
+        }},
+        ...
+    ],
+    "recommendations": ["recomendación 1", "recomendación 2", ...]
+}}
+
+IMPORTANTE:
+- Sé empático y profesional
+- No hagas diagnósticos definitivos, solo sugerencias basadas en patrones
+- Responde SOLO en JSON válido sin texto adicional
+- Si no hay datos suficientes, deja los arrays vacíos"""
+                
+                logger.info(f"   🤖 Llamando a Hermes para {user_email}...")
+                response = ollama.generate(
+                    model="hermes",
+                    prompt=analysis_prompt,
+                    stream=False
+                )
+                
+                logger.info(f"   ✅ Respuesta recibida de {user_email}")
+                response_text = response.get("response", "").strip()
+                
+                # Extraer JSON
+                if "```json" in response_text:
+                    response_text = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    response_text = response_text.split("```")[1].split("```")[0].strip()
+                
+                analysis_data = json.loads(response_text)
+                logger.info(f"   📋 Análisis completado para {user_email}")
+                
+                return {
+                    "user_id": user_id,
+                    "user_email": user_email,
+                    "overall_assessment": analysis_data.get("overall_assessment", ""),
+                    "detected_patterns": analysis_data.get("detected_patterns", []),
+                    "possible_disorders": analysis_data.get("possible_disorders", []),
+                    "recommendations": analysis_data.get("recommendations", []),
+                    "analysis_date": datetime.now().isoformat(),
+                    "total_messages": len(user_msgs)
+                }
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"   ❌ Error JSON para {user.get('email', 'desconocido')}: {str(e)}")
+                return None
+            except Exception as e:
+                logger.error(f"   ❌ Error analizando usuario {user.get('email', 'desconocido')}: {str(e)}")
+                return None
+        
+        # Procesamiento paralelo: máx 3 análisis simultáneos para no saturar
+        logger.info("⚙️  Iniciando procesamiento paralelo (max 3 workers)...")
+        
+        all_analysis = []
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="analysis_") as executor:
+            futures = {executor.submit(analyze_user, user): user for user in all_users}
+            completed = 0
+            
+            for future in as_completed(futures, timeout=300):  # 5 minutos timeout
+                try:
+                    result = future.result(timeout=60)  # 1 minuto timeout por usuario
+                    if result:
+                        all_analysis.append(result)
+                    completed += 1
+                    logger.info(f"📈 Progreso: {completed}/{len(all_users)} usuarios analizados")
+                except Exception as e:
+                    logger.error(f"❌ Error en worker: {str(e)}")
+                    completed += 1
+        
+        logger.info(f"✅ Análisis completado. Total: {len(all_analysis)} usuarios analizados")
+        return {
+            "total_users_analyzed": len(all_analysis),
+            "analysis": all_analysis
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error general en análisis de todos los trastornos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en análisis: {str(e)}")

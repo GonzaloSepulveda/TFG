@@ -28,6 +28,19 @@ const translations = {
     signOut: "Sign out",
     messages: "Messages",
     loading: "Loading...",
+    disordersAnalysis: "Disorders Analysis",
+    analyzeAllPatients: "Analyze All Patients",
+    analyzing: "Analyzing...",
+    patient: "Patient",
+    assessment: "Assessment",
+    patterns: "Patterns",
+    disorders: "Possible Disorders",
+    recommendations: "Recommendations",
+    totalMessagesLabel: "Total Messages",
+    confidence: "Confidence",
+    indicators: "Indicators",
+    noDisorders: "No disorders detected",
+    noPatients: "No patients to analyze",
   },
   es: {
     dashboard: "Panel de Administración",
@@ -40,6 +53,19 @@ const translations = {
     signOut: "Cerrar sesión",
     messages: "Mensajes",
     loading: "Cargando...",
+    disordersAnalysis: "Análisis de Trastornos",
+    analyzeAllPatients: "Analizar Todos los Pacientes",
+    analyzing: "Analizando...",
+    patient: "Paciente",
+    assessment: "Evaluación",
+    patterns: "Patrones Detectados",
+    disorders: "Posibles Trastornos",
+    recommendations: "Recomendaciones",
+    totalMessagesLabel: "Total de Mensajes",
+    confidence: "Confianza",
+    indicators: "Indicadores",
+    noDisorders: "Sin trastornos detectados",
+    noPatients: "Sin pacientes para analizar",
   }
 };
 
@@ -56,6 +82,10 @@ export default function Dashboard() {
   const [expandedConv, setExpandedConv] = useState<string | null>(null);
   const [expandedMessages, setExpandedMessages] = useState<Message[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [activeTab, setActiveTab] = useState<"conversations" | "disorders">("conversations");
+  const [disordersAnalysis, setDisordersAnalysis] = useState<any[]>([]);
+  const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const t = (key: TranslationKey) => translations[language][key];
@@ -162,6 +192,73 @@ export default function Dashboard() {
     return date.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
   };
 
+  const loadDisordersAnalysis = async () => {
+    if (!token) return;
+    
+    setLoadingAnalysis(true);
+    setAnalysisProgress(10);
+    
+    try {
+      // Simular progreso mientras se carga
+      const progressInterval = setInterval(() => {
+        setAnalysisProgress(prev => {
+          if (prev >= 90) return 90; // No superar 90% hasta que termine
+          const nextProgress = prev + Math.random() * 15;
+          return nextProgress > 90 ? 90 : nextProgress;
+        });
+      }, 300);
+      
+      const res = await fetch("http://localhost:8000/admin/disorders-analysis", {
+        headers,
+        signal: abortControllerRef.current?.signal,
+      });
+      
+      clearInterval(progressInterval);
+      
+      if (res.ok) {
+        const data = await res.json();
+        setDisordersAnalysis(data.analysis || []);
+        setAnalysisProgress(100); // Establecer a 100% cuando termina
+        
+        // Limpiar progreso después de 1.5 segundos
+        setTimeout(() => {
+          setAnalysisProgress(0);
+          setLoadingAnalysis(false);
+        }, 1500);
+      } else {
+        setAnalysisProgress(0);
+        setLoadingAnalysis(false);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        console.error("Error cargando análisis:", err);
+      }
+      setAnalysisProgress(0);
+      setLoadingAnalysis(false);
+    }
+  };
+
+  const getConfidenceColor = (confidence: string) => {
+    switch (confidence.toLowerCase()) {
+      case "alta":
+        return darkMode 
+          ? "bg-red-900 border-red-700 text-red-100" 
+          : "bg-red-100 border-red-300 text-red-800";
+      case "media":
+        return darkMode 
+          ? "bg-yellow-900 border-yellow-700 text-yellow-100" 
+          : "bg-yellow-100 border-yellow-300 text-yellow-800";
+      case "baja":
+        return darkMode 
+          ? "bg-blue-900 border-blue-700 text-blue-100" 
+          : "bg-blue-100 border-blue-300 text-blue-800";
+      default:
+        return darkMode 
+          ? "bg-gray-900 border-gray-700 text-gray-100" 
+          : "bg-gray-100 border-gray-300 text-gray-800";
+    }
+  };
+
   const filteredConversations = conversations.filter(conv =>
     conv.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (conv.user_id && conv.user_id.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -242,12 +339,44 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <div class="max-w-7xl mx-auto px-8 py-8">
-        <div class="mb-6">
-          <h2 class="text-2xl font-bold mb-4">{t("allConversations")}</h2>
-          <input
-            type="text"
-            placeholder={t("search")}
-            value={searchQuery}
+        {/* Tabs */}
+        <div class="mb-6 flex gap-4 border-b" style={`border-color: ${darkMode ? '#475569' : '#e2e8f0'}`}>
+          <button
+            onClick={() => setActiveTab("conversations")}
+            class={`px-6 py-3 font-semibold transition-all border-b-2 ${
+              activeTab === "conversations"
+                ? `border-teal-500 text-teal-600 ${darkMode ? "bg-slate-700/30" : ""}`
+                : `border-transparent ${darkMode ? "text-slate-400 hover:text-slate-300" : "text-slate-600 hover:text-slate-700"}`
+            }`}
+          >
+            💬 {t("allConversations")}
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab("disorders");
+              if (disordersAnalysis.length === 0) {
+                loadDisordersAnalysis();
+              }
+            }}
+            class={`px-6 py-3 font-semibold transition-all border-b-2 ${
+              activeTab === "disorders"
+                ? `border-orange-500 text-orange-600 ${darkMode ? "bg-slate-700/30" : ""}`
+                : `border-transparent ${darkMode ? "text-slate-400 hover:text-slate-300" : "text-slate-600 hover:text-slate-700"}`
+            }`}
+          >
+            🧠 {t("disordersAnalysis")}
+          </button>
+        </div>
+
+        {/* Content based on active tab */}
+        {activeTab === "conversations" ? (
+          <>
+            <div class="mb-6">
+              <h2 class="text-2xl font-bold mb-4">{t("allConversations")}</h2>
+              <input
+                type="text"
+                placeholder={t("search")}
+                value={searchQuery}
             onInput={(e) => setSearchQuery(e.currentTarget.value)}
             class={`w-full px-4 py-3 rounded-lg outline-none text-sm transition-colors ${
               darkMode
@@ -432,6 +561,199 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
+          </>
+        ) : (
+          <>
+            {/* Disorders Analysis Tab */}
+            <div class="mb-6 flex items-center justify-between">
+              <h2 class="text-2xl font-bold">{t("disordersAnalysis")}</h2>
+              <button
+                onClick={loadDisordersAnalysis}
+                disabled={loadingAnalysis}
+                class={`px-6 py-3 rounded-lg font-semibold transition-all ${
+                  loadingAnalysis
+                    ? "bg-slate-400 text-slate-600 cursor-not-allowed"
+                    : darkMode
+                    ? "bg-orange-600 hover:bg-orange-500 text-white"
+                    : "bg-orange-500 hover:bg-orange-600 text-white"
+                }`}
+              >
+                {loadingAnalysis ? t("analyzing") : t("analyzeAllPatients")}
+              </button>
+            </div>
+
+            {/* Progress Bar */}
+            {(loadingAnalysis || analysisProgress > 0) && (
+              <div class="mb-6">
+                <div
+                  class={`w-full h-3 rounded-full overflow-hidden ${
+                    darkMode ? "bg-slate-700" : "bg-slate-200"
+                  }`}
+                >
+                  <style>{`
+                    @keyframes progress-pulse {
+                      0% { opacity: 1; }
+                      50% { opacity: 0.7; }
+                      100% { opacity: 1; }
+                    }
+                    .progress-bar {
+                      animation: progress-pulse 1s ease-in-out infinite;
+                    }
+                  `}</style>
+                  <div
+                    class={`h-full ${
+                      analysisProgress === 100
+                        ? "bg-green-500"
+                        : "bg-gradient-to-r from-orange-400 to-orange-600 progress-bar"
+                    }`}
+                    style={{
+                      width: `${analysisProgress}%`,
+                      transition: analysisProgress === 100 ? "width 0.3s ease-out" : "width 0.1s linear",
+                    }}
+                  />
+                </div>
+                <p class={`text-sm mt-2 text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>
+                  {analysisProgress === 100
+                    ? "✓ Análisis completado"
+                    : `Analizando... ${Math.floor(analysisProgress)}%`}
+                </p>
+              </div>
+            )}
+
+            {disordersAnalysis.length > 0 ? (
+              <div class="space-y-6">
+                {disordersAnalysis.map((patient, idx) => (
+                  <div
+                    key={idx}
+                    class={`rounded-lg overflow-hidden shadow-lg ${
+                      darkMode ? "bg-slate-800" : "bg-white"
+                    }`}
+                  >
+                    {/* Patient Header */}
+                    <div
+                      class={`px-6 py-4 border-b ${
+                        darkMode
+                          ? "bg-slate-700 border-slate-600"
+                          : "bg-slate-50 border-slate-200"
+                      }`}
+                    >
+                      <div class="flex justify-between items-start">
+                        <div>
+                          <p class="text-sm font-medium opacity-75">{t("patient")}</p>
+                          <p class={`text-lg font-semibold ${darkMode ? "text-slate-100" : "text-slate-800"}`}>
+                            {patient.user_email}
+                          </p>
+                        </div>
+                        <div class="text-right">
+                          <p class="text-sm opacity-75">{t("totalMessagesLabel")}</p>
+                          <p class="text-2xl font-bold text-teal-500">{patient.total_messages}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Patient Content */}
+                    <div class="px-6 py-4 space-y-4">
+                      {/* Overall Assessment */}
+                      <div>
+                        <h4 class={`font-semibold mb-2 ${darkMode ? "text-orange-400" : "text-orange-600"}`}>
+                          {t("assessment")}
+                        </h4>
+                        <p class={darkMode ? "text-slate-300" : "text-slate-700"}>
+                          {patient.overall_assessment || "N/A"}
+                        </p>
+                      </div>
+
+                      {/* Detected Patterns */}
+                      {patient.detected_patterns && patient.detected_patterns.length > 0 && (
+                        <div>
+                          <h4 class={`font-semibold mb-2 ${darkMode ? "text-blue-400" : "text-blue-600"}`}>
+                            {t("patterns")}
+                          </h4>
+                          <div class="flex flex-wrap gap-2">
+                            {patient.detected_patterns.map((pattern: string, i: number) => (
+                              <span
+                                key={i}
+                                class={`px-3 py-1 rounded-full text-sm ${
+                                  darkMode
+                                    ? "bg-blue-900 text-blue-100"
+                                    : "bg-blue-100 text-blue-800"
+                                }`}
+                              >
+                                {pattern}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Possible Disorders */}
+                      {patient.possible_disorders && patient.possible_disorders.length > 0 ? (
+                        <div>
+                          <h4 class={`font-semibold mb-3 ${darkMode ? "text-red-400" : "text-red-600"}`}>
+                            {t("disorders")}
+                          </h4>
+                          <div class="space-y-3">
+                            {patient.possible_disorders.map((disorder: any, i: number) => (
+                              <div
+                                key={i}
+                                class={`rounded-lg p-4 border ${getConfidenceColor(disorder.confidence)}`}
+                              >
+                                <div class="flex justify-between items-center mb-2">
+                                  <h5 class="font-semibold">{disorder.name}</h5>
+                                  <span class="text-sm font-semibold">
+                                    {t("confidence")}: {disorder.confidence}
+                                  </span>
+                                </div>
+                                {disorder.indicators && disorder.indicators.length > 0 && (
+                                  <div>
+                                    <p class="text-sm font-medium mb-1 opacity-75">{t("indicators")}:</p>
+                                    <ul class="text-sm space-y-1">
+                                      {disorder.indicators.map((indicator: string, j: number) => (
+                                        <li key={j}>• {indicator}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <p class={`text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                          ✓ {t("noDisorders")}
+                        </p>
+                      )}
+
+                      {/* Recommendations */}
+                      {patient.recommendations && patient.recommendations.length > 0 && (
+                        <div>
+                          <h4 class={`font-semibold mb-2 ${darkMode ? "text-green-400" : "text-green-600"}`}>
+                            {t("recommendations")}
+                          </h4>
+                          <ul class={`space-y-1 text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
+                            {patient.recommendations.map((rec: string, i: number) => (
+                              <li key={i}>• {rec}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div
+                class={`rounded-lg p-12 text-center shadow-lg ${
+                  darkMode ? "bg-slate-800" : "bg-white"
+                }`}
+              >
+                <p class={`text-lg ${darkMode ? "text-slate-400" : "text-slate-600"}`}>
+                  {loadingAnalysis ? t("loading") : t("noPatients")}
+                </p>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Footer */}

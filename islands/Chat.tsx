@@ -630,7 +630,7 @@ export default function Chat() {
                       <span>•</span>
                       <button
                         onClick={() => copyToClipboard(m.content, m.id || "")}
-                        class={`opacity-0 group-hover:opacity-100 transition-opacity hover:text-teal-500`}
+                        class={`transition-opacity hover:text-teal-500`}
                         title={t("copy")}
                       >
                         {copiedId === m.id ? t("copied") : t("copy")}
@@ -638,8 +638,12 @@ export default function Chat() {
                       <span>•</span>
                       <button
                         onClick={() => rateMessage(m.id, "up")}
-                        class={`transition-colors ${
-                          m.rated === "up" ? "text-green-500" : "hover:text-green-500"
+                        class={`transition-all ${
+                          m.rated === "up" 
+                            ? "text-green-500" 
+                            : m.rated === "down"
+                            ? "opacity-30 hover:text-green-500"
+                            : "hover:text-green-500"
                         }`}
                         title="Útil"
                       >
@@ -647,8 +651,12 @@ export default function Chat() {
                       </button>
                       <button
                         onClick={() => rateMessage(m.id, "down")}
-                        class={`transition-colors ${
-                          m.rated === "down" ? "text-red-500" : "hover:text-red-500"
+                        class={`transition-all ${
+                          m.rated === "down" 
+                            ? "text-red-500" 
+                            : m.rated === "up"
+                            ? "opacity-30 hover:text-red-500"
+                            : "hover:text-red-500"
                         }`}
                         title="No útil"
                       >
