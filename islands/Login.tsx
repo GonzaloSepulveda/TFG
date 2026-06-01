@@ -25,6 +25,9 @@ export default function Login() {
     } else {
       // 3. En lugar del alert, actualizamos nuestro estado
       setErrorMsg("Error en el acceso, compruebe sus credenciales");
+      // Limpiar datos de autenticación por seguridad
+      localStorage.removeItem("token");
+      localStorage.removeItem("admin");
     }
   };
 

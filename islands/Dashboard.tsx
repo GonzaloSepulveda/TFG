@@ -4,6 +4,7 @@ interface Conversation {
   conversation_id: string;
   title: string;
   user_id: string;
+  user_name?: string;
   created_at?: string;
   tags?: any[];
 }
@@ -196,42 +197,73 @@ export default function Dashboard() {
     if (!token) return;
     
     setLoadingAnalysis(true);
-    setAnalysisProgress(10);
+    setAnalysisProgress(0);
     
     try {
-      // Simular progreso mientras se carga
-      const progressInterval = setInterval(() => {
-        setAnalysisProgress(prev => {
-          if (prev >= 90) return 90; // No superar 90% hasta que termine
-          const nextProgress = prev + Math.random() * 15;
-          return nextProgress > 90 ? 90 : nextProgress;
-        });
-      }, 300);
-      
       const res = await fetch("http://localhost:8000/admin/disorders-analysis", {
         headers,
         signal: abortControllerRef.current?.signal,
       });
       
-      clearInterval(progressInterval);
-      
-      if (res.ok) {
-        const data = await res.json();
-        setDisordersAnalysis(data.analysis || []);
-        setAnalysisProgress(100); // Establecer a 100% cuando termina
-        
-        // Limpiar progreso después de 1.5 segundos
-        setTimeout(() => {
-          setAnalysisProgress(0);
-          setLoadingAnalysis(false);
-        }, 1500);
-      } else {
-        setAnalysisProgress(0);
+      if (!res.ok) {
         setLoadingAnalysis(false);
+        return;
+      }
+      
+      // Procesar Server-Sent Events (SSE)
+      const reader = res.body?.getReader();
+      if (!reader) return;
+      
+      const decoder = new TextDecoder();
+      let buffer = "";
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines[lines.length - 1];
+        
+        for (let i = 0; i < lines.length - 1; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith("data: ")) {
+            try {
+              const event = JSON.parse(line.slice(6));
+              
+              if (event.type === "start") {
+                console.log("🔍 Iniciando análisis para", event.total, "usuarios");
+                setAnalysisProgress(5);
+              } 
+              else if (event.type === "progress") {
+                console.log(`📈 Progreso: ${event.percent}% (${event.completed}/${event.total})`);
+                setAnalysisProgress(event.percent);
+              } 
+              else if (event.type === "complete") {
+                console.log("✅ Análisis completado");
+                setDisordersAnalysis(event.analysis || []);
+                setAnalysisProgress(100);
+                
+                // Limpiar después de 1 segundo
+                setTimeout(() => {
+                  setAnalysisProgress(0);
+                  setLoadingAnalysis(false);
+                }, 1000);
+              } 
+              else if (event.type === "error") {
+                console.error("❌ Error en análisis:", event.message);
+                setAnalysisProgress(0);
+                setLoadingAnalysis(false);
+              }
+            } catch (e) {
+              console.error("Error parsing SSE event:", e);
+            }
+          }
+        }
       }
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
-        console.error("Error cargando análisis:", err);
+        console.error("Error en análisis:", err);
       }
       setAnalysisProgress(0);
       setLoadingAnalysis(false);
@@ -261,7 +293,8 @@ export default function Dashboard() {
 
   const filteredConversations = conversations.filter(conv =>
     conv.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (conv.user_id && conv.user_id.toLowerCase().includes(searchQuery.toLowerCase()))
+    (conv.user_id && conv.user_id.toLowerCase().includes(searchQuery.toLowerCase())) ||
+    (conv.user_name && conv.user_name.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   return (
@@ -443,7 +476,7 @@ export default function Dashboard() {
                           darkMode ? "text-slate-400" : "text-slate-500"
                         }`}
                       >
-                        {conv.user_id}
+                        {conv.user_name || conv.user_id}
                       </td>
                       <td
                         class={`px-6 py-4 text-sm ${

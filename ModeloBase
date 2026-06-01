@@ -1,0 +1,24 @@
+# 1. Base Model
+FROM mistral
+
+# 2. TECHNICAL PARAMETERS
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+PARAMETER num_ctx 4096
+PARAMETER repeat_penalty 1.15
+
+# ✅ Stop Words (Actualizados con tu lista + las etiquetas de Mistral)
+PARAMETER stop "[INST]"
+PARAMETER stop "[/INST]"
+PARAMETER stop "User:"
+PARAMETER stop "\nUser:"
+PARAMETER stop "Usuario:"
+PARAMETER stop "\nUsuario:"
+PARAMETER stop "Usuario: "
+PARAMETER stop "Hermes: "
+PARAMETER stop "Prometeo: "
+
+# 3. TEMPLATE (CRÍTICO: Formato exacto de Mistral)
+TEMPLATE """[INST] {{ if .System }}{{ .System }}
+
+{{ end }}{{ .Prompt }} [/INST]"""

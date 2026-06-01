@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import ollama
 from db import users_collection, conversations_collection, messages_collection, profiles_collection, ratings_collection, stats_collection
+from security import hash_password, verify_password, encrypt_email, decrypt_email, find_user_by_email, get_email_hash
 from datetime import datetime
 from bson import ObjectId
 import asyncio
@@ -93,9 +94,15 @@ class DisorderAnalysisResponse(BaseModel):
 async def get_current_user(authorization: str = Header(...)):
     try:
         token = authorization.split(" ")[1]
-        # Decodificar token Base64 para obtener el email
-        decoded_email = base64.b64decode(token).decode('utf-8')
-        user = users_collection.find_one({"email": decoded_email})
+        # El token es el email encriptado en base64
+        decoded_email_encrypted = base64.b64decode(token).decode('utf-8')
+        # Desencriptar el email para obtener el texto real
+        email = decrypt_email(decoded_email_encrypted)
+        
+        # Buscar usuario por el hash exacto
+        email_hash = get_email_hash(email)
+        user = users_collection.find_one({"email_hash": email_hash})
+        
         if not user: 
             raise HTTPException(status_code=401, detail="Usuario no encontrado")
         return user
@@ -103,28 +110,56 @@ async def get_current_user(authorization: str = Header(...)):
         raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"No autorizado: {str(e)}")
-
+    
 @app.post("/auth")
 async def auth(user: UserAuth):
-    if user.isRegister:
-        if users_collection.find_one({"email": user.email}):
-            raise HTTPException(status_code=400, detail="El usuario ya existe")
-        users_collection.insert_one({"email": user.email, "password": user.password, "admin": False})
-        # Generar token enmascarado con Base64
-        token = base64.b64encode(user.email.encode('utf-8')).decode('utf-8')
-        return {"access_token": token, "admin": False} 
+    # Generar el hash (para buscar) y el encriptado (para guardar)
+    email_hash = get_email_hash(user.email)
+    encrypted_email = encrypt_email(user.email)
     
-    db_user = users_collection.find_one({"email": user.email, "password": user.password})
-    if not db_user:
+    if user.isRegister:
+        # Verificar si el usuario ya existe (buscando el hash)
+        if users_collection.find_one({"email_hash": email_hash}):
+            raise HTTPException(status_code=400, detail="El usuario ya existe")
+        
+        # Hashear contraseña y guardar usuario con el nuevo campo email_hash
+        hashed_password = hash_password(user.password)
+        users_collection.insert_one({
+            "email": encrypted_email, 
+            "email_hash": email_hash,
+            "password": hashed_password, 
+            "admin": False
+        })
+        
+        token = base64.b64encode(encrypted_email.encode('utf-8')).decode('utf-8')
+        return {"access_token": token, "admin": False}
+    
+    # Login: buscar por el hash determinista
+    db_user = users_collection.find_one({"email_hash": email_hash})
+    if not db_user or not verify_password(user.password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    # Generar token enmascarado con Base64
-    token = base64.b64encode(user.email.encode('utf-8')).decode('utf-8')
+    
+    # Generar token con el email encriptado que está en la base de datos
+    token = base64.b64encode(db_user["email"].encode('utf-8')).decode('utf-8')
     admin = db_user.get("admin", False)
     return {"access_token": token, "admin": admin}
-
 # ===============================
 # GESTIÓN DE PERFILES DE USUARIO
 # ===============================
+@app.get("/me")
+async def get_current_user_info(current_user=Depends(get_current_user)):
+    """Obtener información del usuario actual (incluyendo email desencriptado)"""
+    try:
+        email_decrypted = decrypt_email(current_user.get("email", ""))
+    except:
+        email_decrypted = "error-decrypting"
+    
+    return {
+        "user_id": str(current_user["_id"]),
+        "email": email_decrypted,
+        "admin": current_user.get("admin", False)
+    }
+
 @app.get("/profile")
 async def get_profile(current_user=Depends(get_current_user)):
     profile = profiles_collection.find_one({"user_id": str(current_user["_id"])})
@@ -306,7 +341,37 @@ async def get_all_conversations(current_user=Depends(get_current_user)):
     if not current_user.get("admin", False):
         raise HTTPException(status_code=403, detail="No tienes permisos para acceder a este recurso")
     convs = conversations_collection.find().sort("created_at", -1)
-    return [{"conversation_id": str(c["_id"]), "title": c.get("title", "Nueva sesión"), "user_id": c.get("user_id"), "created_at": c.get("created_at"), "tags": c.get("tags", [])} for c in convs]
+    
+    result = []
+    for c in convs:
+        user_id = c.get("user_id")
+        
+        # Obtener nombre del perfil o email del usuario
+        user_name = "Desconocido"
+        if user_id:
+            # Intentar obtener el nombre del perfil
+            profile = profiles_collection.find_one({"user_id": user_id})
+            if profile and profile.get("nome_completo"):
+                user_name = profile.get("nome_completo")
+            else:
+                # Si no hay nombre en el perfil, obtener el email desencriptado
+                user = users_collection.find_one({"_id": ObjectId(user_id)})
+                if user:
+                    try:
+                        user_name = decrypt_email(user.get("email", "Desconocido"))
+                    except:
+                        user_name = "Desconocido"
+        
+        result.append({
+            "conversation_id": str(c["_id"]), 
+            "title": c.get("title", "Nueva sesión"), 
+            "user_id": user_id,
+            "user_name": user_name,
+            "created_at": c.get("created_at"), 
+            "tags": c.get("tags", [])
+        })
+    
+    return result
 
 @app.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, current_user=Depends(get_current_user)):
@@ -696,55 +761,70 @@ IMPORTANTE:
 @app.get("/admin/disorders-analysis")
 async def analyze_all_disorders(current_user=Depends(get_current_user)):
     """
-    Solo para admins: Analiza todos los usuarios y retorna análisis de trastornos con progreso.
-    Usa procesamiento paralelo para acelerar el análisis.
+    Solo para admins: Analiza todos los usuarios y retorna análisis de trastornos con progreso en tiempo real.
+    Usa Server-Sent Events (SSE) para enviar actualizaciones de progreso.
     """
     # Verificar permisos de admin
     if not current_user.get("admin", False):
         raise HTTPException(status_code=403, detail="No tienes permisos para acceder a este recurso")
     
-    try:
-        import json
-        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-        
-        logger.info("🔍 Iniciando análisis de trastornos para todos los usuarios")
-        
-        # Obtener todos los usuarios
-        all_users = list(users_collection.find({}))
-        logger.info(f"📊 Total de usuarios encontrados: {len(all_users)}")
-        
-        all_analysis = []
-        
-        def analyze_user(user):
-            """Función para analizar un único usuario"""
-            try:
-                user_id = str(user["_id"])
-                user_email = user.get("email", "desconocido")
-                logger.info(f"👤 Analizando usuario: {user_email}")
-                
-                # Obtener mensajes del usuario
-                user_messages = list(messages_collection.find({
-                    "user_id": user_id
-                }).sort("timestamp", 1))
-                
-                logger.info(f"   → {user_email} tiene {len(user_messages)} mensajes totales")
-                
-                if not user_messages:
-                    logger.info(f"   ⏭️  {user_email} sin mensajes, saltando...")
-                    return None  # Saltar usuarios sin mensajes
-                
-                # Construir contexto
-                user_msgs = [msg["content"] for msg in user_messages if msg["role"] == "user"]
-                if not user_msgs:
-                    logger.info(f"   ⏭️  {user_email} sin mensajes de usuario, saltando...")
-                    return None
-                
-                logger.info(f"   📝 Preparando contexto con {len(user_msgs[-20:])} últimos mensajes")
-                conversation_context = "\n".join([f"Usuario: {msg}" for msg in user_msgs[-20:]])
-                
-                # Prompt para análisis
-                analysis_prompt = f"""Eres un asistente psicológico especializado en análisis de patrones de comportamiento y síntomas.
-        
+    async def event_generator():
+        try:
+            import json
+            from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+            
+            logger.info("🔍 Iniciando análisis de trastornos para todos los usuarios")
+            
+            # Obtener todos los usuarios
+            all_users = list(users_collection.find({}))
+            total_users = len(all_users)
+            logger.info(f"📊 Total de usuarios encontrados: {total_users}")
+            
+            # Enviar evento inicial
+            yield f"data: {json.dumps({'type': 'start', 'total': total_users})}\n\n"
+            
+            all_analysis = []
+            
+            def analyze_user(user):
+                """Función para analizar un único usuario"""
+                try:
+                    user_id = str(user["_id"])
+                    
+                    # 1. Obtener el email encriptado de la BD
+                    raw_email = user.get("email", "desconocido")
+                    
+                    # 2. Desencriptarlo antes de usarlo o enviarlo
+                    try:
+                        user_email = decrypt_email(raw_email) if raw_email != "desconocido" else "desconocido"
+                    except Exception:
+                        # Fallback por si hay un email antiguo sin encriptar o falla
+                        user_email = raw_email
+                        
+                    logger.info(f"👤 Analizando usuario: {user_email}")
+                    
+                    # Obtener mensajes del usuario
+                    user_messages = list(messages_collection.find({
+                        "user_id": user_id
+                    }).sort("timestamp", 1))
+                    
+                    logger.info(f"   → {user_email} tiene {len(user_messages)} mensajes totales")
+                    
+                    if not user_messages:
+                        logger.info(f"   ⏭️  {user_email} sin mensajes, saltando...")
+                        return None  # Saltar usuarios sin mensajes
+                    
+                    # Construir contexto
+                    user_msgs = [msg["content"] for msg in user_messages if msg["role"] == "user"]
+                    if not user_msgs:
+                        logger.info(f"   ⏭️  {user_email} sin mensajes de usuario, saltando...")
+                        return None
+                    
+                    logger.info(f"   📝 Preparando contexto con {len(user_msgs[-50:])} últimos mensajes")
+                    conversation_context = "\n".join([f"Usuario: {msg}" for msg in user_msgs[-50:]])
+                    
+                    # Prompt para análisis
+                    analysis_prompt = f"""Eres un asistente psicológico especializado en análisis de patrones de comportamiento y síntomas.
+            
 Analiza las siguientes expresiones del usuario y proporciona un análisis estructurado sobre posibles trastornos o condiciones mentales.
 
 CONVERSACIONES DEL USUARIO:
@@ -770,69 +850,76 @@ IMPORTANTE:
 - No hagas diagnósticos definitivos, solo sugerencias basadas en patrones
 - Responde SOLO en JSON válido sin texto adicional
 - Si no hay datos suficientes, deja los arrays vacíos"""
-                
-                logger.info(f"   🤖 Llamando a Hermes para {user_email}...")
-                response = ollama.generate(
-                    model="hermes",
-                    prompt=analysis_prompt,
-                    stream=False
-                )
-                
-                logger.info(f"   ✅ Respuesta recibida de {user_email}")
-                response_text = response.get("response", "").strip()
-                
-                # Extraer JSON
-                if "```json" in response_text:
-                    response_text = response_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in response_text:
-                    response_text = response_text.split("```")[1].split("```")[0].strip()
-                
-                analysis_data = json.loads(response_text)
-                logger.info(f"   📋 Análisis completado para {user_email}")
-                
-                return {
-                    "user_id": user_id,
-                    "user_email": user_email,
-                    "overall_assessment": analysis_data.get("overall_assessment", ""),
-                    "detected_patterns": analysis_data.get("detected_patterns", []),
-                    "possible_disorders": analysis_data.get("possible_disorders", []),
-                    "recommendations": analysis_data.get("recommendations", []),
-                    "analysis_date": datetime.now().isoformat(),
-                    "total_messages": len(user_msgs)
-                }
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"   ❌ Error JSON para {user.get('email', 'desconocido')}: {str(e)}")
-                return None
-            except Exception as e:
-                logger.error(f"   ❌ Error analizando usuario {user.get('email', 'desconocido')}: {str(e)}")
-                return None
-        
-        # Procesamiento paralelo: máx 3 análisis simultáneos para no saturar
-        logger.info("⚙️  Iniciando procesamiento paralelo (max 3 workers)...")
-        
-        all_analysis = []
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="analysis_") as executor:
-            futures = {executor.submit(analyze_user, user): user for user in all_users}
-            completed = 0
-            
-            for future in as_completed(futures, timeout=300):  # 5 minutos timeout
-                try:
-                    result = future.result(timeout=60)  # 1 minuto timeout por usuario
-                    if result:
-                        all_analysis.append(result)
-                    completed += 1
-                    logger.info(f"📈 Progreso: {completed}/{len(all_users)} usuarios analizados")
+                    
+                    logger.info(f"   🤖 Llamando a Hermes para {user_email}...")
+                    response = ollama.generate(
+                        model="hermes",
+                        prompt=analysis_prompt,
+                        stream=False
+                    )
+                    
+                    logger.info(f"   ✅ Respuesta recibida de {user_email}")
+                    response_text = response.get("response", "").strip()
+                    
+                    # Extraer JSON
+                    if "```json" in response_text:
+                        response_text = response_text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in response_text:
+                        response_text = response_text.split("```")[1].split("```")[0].strip()
+                    
+                    analysis_data = json.loads(response_text)
+                    logger.info(f"   📋 Análisis completado para {user_email}")
+                    
+                    return {
+                        "user_id": user_id,
+                        "user_email": user_email,
+                        "overall_assessment": analysis_data.get("overall_assessment", ""),
+                        "detected_patterns": analysis_data.get("detected_patterns", []),
+                        "possible_disorders": analysis_data.get("possible_disorders", []),
+                        "recommendations": analysis_data.get("recommendations", []),
+                        "analysis_date": datetime.now().isoformat(),
+                        "total_messages": len(user_msgs)
+                    }
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"   ❌ Error JSON para {user.get('email', 'desconocido')}: {str(e)}")
+                    return None
                 except Exception as e:
-                    logger.error(f"❌ Error en worker: {str(e)}")
-                    completed += 1
-        
-        logger.info(f"✅ Análisis completado. Total: {len(all_analysis)} usuarios analizados")
-        return {
-            "total_users_analyzed": len(all_analysis),
-            "analysis": all_analysis
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error general en análisis de todos los trastornos: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error en análisis: {str(e)}")
+                    logger.error(f"   ❌ Error analizando usuario {user.get('email', 'desconocido')}: {str(e)}")
+                    return None
+            
+            # Procesamiento paralelo: máx 3 análisis simultáneos para no saturar
+            logger.info("⚙️  Iniciando procesamiento paralelo (max 3 workers)...")
+            
+            all_analysis = []
+            completed = 0
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="analysis_") as executor:
+                futures = {executor.submit(analyze_user, user): user for user in all_users}
+                
+                for future in as_completed(futures, timeout=2400):  # 20 minutos timeout
+                    try:
+                        result = future.result(timeout=300)  # 5 minuto timeout por usuario
+                        if result:
+                            all_analysis.append(result)
+                        completed += 1
+                        
+                        # Calcular porcentaje de progreso
+                        progress_percent = round((completed / total_users) * 100)
+                        logger.info(f"📈 Progreso: {completed}/{total_users} ({progress_percent}%)")
+                        
+                        # Enviar evento de progreso
+                        yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'total': total_users, 'percent': progress_percent})}\n\n"
+                    except Exception as e:
+                        logger.error(f"❌ Error en worker: {str(e)}")
+                        completed += 1
+            
+            logger.info(f"✅ Análisis completado. Total: {len(all_analysis)} usuarios analizados")
+            
+            # Enviar datos finales
+            yield f"data: {json.dumps({'type': 'complete', 'total_users_analyzed': len(all_analysis), 'analysis': all_analysis})}\n\n"
+            
+        except Exception as e:
+            logger.error(f"❌ Error general en análisis de todos los trastornos: {str(e)}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
