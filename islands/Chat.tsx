@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "preact/hooks";
+import { marked } from "marked";
 
 interface Message {
   role: "user" | "bot";
@@ -43,7 +44,6 @@ const translations = {
     useful: "👍",
     notUseful: "👎",
     errorConnection: "❌ Connection error.",
-    stop: "Stop",
     send: "Send",
     errorCreatingConv: "Error creating new conversation.",
     errorAutoSession: "Error starting automatic session.",
@@ -72,7 +72,6 @@ const translations = {
     useful: "👍",
     notUseful: "👎",
     errorConnection: "❌ Error de conexión.",
-    stop: "Detener",
     send: "Enviar",
     errorCreatingConv: "Error al crear nueva conversación.",
     errorAutoSession: "Error al iniciar la sesión automática.",
@@ -470,13 +469,6 @@ export default function Chat() {
     }
   };
 
-  const stopStreaming = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      setIsGenerating(false);
-    }
-  };
-
   const toggleLanguage = (lang: "en" | "es") => {
     setLanguage(lang);
     localStorage.setItem("language", lang);
@@ -610,16 +602,17 @@ export default function Chat() {
           {messages.map((m, i) => (
             <div key={i} class={`flex ${m.role === "user" ? "justify-end" : "justify-start"} group`}>
               <div class={`max-w-[70%] flex flex-col gap-1`}>
-                <div class={`px-6 py-4 rounded-3xl shadow-sm leading-relaxed whitespace-pre-wrap transition-colors ${
+                <div class={`px-6 py-4 rounded-3xl shadow-sm leading-relaxed transition-colors markdown-styles ${
                   m.role === "user"
                     ? darkMode
-                      ? "bg-teal-600 text-white rounded-tr-none"
-                      : "bg-teal-400 text-white rounded-tr-none"
+                      ? "bg-teal-600 text-white rounded-tr-none whitespace-pre-wrap"
+                      : "bg-teal-400 text-white rounded-tr-none whitespace-pre-wrap"
                     : darkMode
                     ? "bg-slate-800 text-slate-100 rounded-tl-none border border-slate-700"
                     : "bg-white text-slate-700 rounded-tl-none border border-slate-100"
-                }`}>
-                  {m.content}
+                }`}
+                dangerouslySetInnerHTML={m.role === "bot" ? { __html: marked.parse(m.content) as string } : undefined}>
+                  {m.role === "user" ? m.content : ""}
                 </div>
                 <div class={`flex items-center gap-2 px-2 text-xs ${
                   darkMode ? "text-slate-500" : "text-slate-400"
@@ -691,15 +684,14 @@ export default function Chat() {
               onKeyDown={(e) => { if (e.key === "Enter") sendMessage(); }}
             />
             {isGenerating ? (
-              <button
-                class={`p-3 rounded-2xl transition-all bg-red-500 hover:bg-red-600 text-white shadow-md`}
-                onClick={stopStreaming}
-                title={t("stop")}
-              >
-                <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
-                  <rect x="4" y="4" width="12" height="12" />
+              <div class={`p-3 rounded-2xl flex items-center justify-center ${
+                darkMode ? "text-teal-400" : "text-teal-500"
+              }`}>
+                <svg class="w-6 h-6 animate-spin" fill="currentColor" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10" class="opacity-25" fill="none" stroke="currentColor" stroke-width="4"></circle>
+                  <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
-              </button>
+              </div>
             ) : (
               <div class="flex gap-2">
                 <div class="relative">

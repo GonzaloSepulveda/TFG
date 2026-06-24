@@ -6,10 +6,17 @@ export default function Login() {
   const [isRegister, setIsRegister] = useState(false);
   // 1. Añadimos un nuevo estado para controlar el mensaje de error
   const [errorMsg, setErrorMsg] = useState("");
+  const [consentimiento, setConsentimiento] = useState(false);
 
   const handleAuth = async (e: Event) => {
     e.preventDefault();
     setErrorMsg(""); // 2. Limpiamos cualquier error previo al intentar de nuevo
+
+    // Validar consentimiento para registro
+    if (isRegister && !consentimiento) {
+      setErrorMsg("Debes dar tu consentimiento para crear una cuenta");
+      return;
+    }
 
     const res = await fetch("http://localhost:8000/auth", {
       method: "POST",
@@ -55,6 +62,25 @@ export default function Login() {
             class="w-full p-3 rounded-2xl border border-slate-200 outline-none focus:ring-2 focus:ring-teal-200" 
           />
           
+          {/* Checkbox de consentimiento solo para registro */}
+          {isRegister && (
+            <div class="flex items-start gap-3 bg-blue-50 p-3 rounded-lg border border-blue-200">
+              <input 
+                type="checkbox" 
+                id="consentimiento" 
+                checked={consentimiento}
+                onInput={(e) => {
+                  setConsentimiento(e.currentTarget.checked);
+                  setErrorMsg("");
+                }}
+                class="w-5 h-5 mt-0.5 cursor-pointer accent-teal-400"
+              />
+              <label for="consentimiento" class="text-sm text-slate-700 cursor-pointer">
+                Consiento que mi información sea tratada por un modelo de lenguaje local
+              </label>
+            </div>
+          )}
+          
           {/* 4. Renderizado condicional del mensaje de error en rojo */}
           {errorMsg && (
             <p class="text-red-500 text-sm font-medium text-center bg-red-50 p-2 rounded-lg">
@@ -70,6 +96,7 @@ export default function Login() {
           onClick={() => {
             setIsRegister(!isRegister);
             setErrorMsg(""); // Limpiar error al cambiar de modo
+            setConsentimiento(false); // Resetear checkbox al cambiar de modo
           }} 
           class="w-full mt-4 text-sm text-teal-500 underline"
         >

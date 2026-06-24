@@ -8,12 +8,22 @@ from security import hash_password, verify_password, encrypt_email, decrypt_emai
 from datetime import datetime
 from bson import ObjectId
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import base64
+import re
+import warnings
 
 # Configurar logging para ver excepciones de socket
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Suppress asyncio socket warnings (expected when clients disconnect abruptly)
+warnings.filterwarnings('ignore', category=ResourceWarning)
+logging.getLogger('asyncio').setLevel(logging.CRITICAL)
+
+# Thread pool for blocking I/O operations (ollama.chat)
+thread_pool = ThreadPoolExecutor(max_workers=10)
 
 # ✅ Título actualizado a Hermes
 app = FastAPI(title="Hermes API - Bienestar Emocional")
@@ -87,6 +97,39 @@ class DisorderAnalysisResponse(BaseModel):
     possible_disorders: list[dict]  # {"name": str, "confidence": str, "indicators": list}
     recommendations: list[str]
     analysis_date: str
+
+
+EMERGENCY_PATTERNS = [
+    # 1. Intención directa de suicidio (Inglés / Español)
+    r"\b(kill myself|suicide|end it all|want to die|better off dead|tired of living)\b",
+    r"\b(matarme|suicidarme|quitarme la vida|quiero morir|mejor muerto|acabar con todo|desaparecer para siempre|no quiero vivir)\b",
+
+    # 2. Referencias a métodos letales (Inglés / Español)
+    r"\b(overdose|take pills|jump off|hang myself|pull the trigger|blow my brains out)\b",
+    r"\b(sobredosis|tomar pastillas|ahorcarme|tirarme de|pegarme un tiro|cortarme las venas)\b",
+
+    # 3. Autolesión explícita (Inglés / Español)
+    r"\b(harm myself|cut myself|burn myself|punish myself|hurt myself)\b",
+    r"\b(autolesionarme|cortarme|quemarme|castigarme|hacerme daño)\b",
+
+    # 4. Desesperanza severa y despedidas (Inglés / Español)
+    r"\b(nobody would care if I died|make it stop forever|cant take this anymore)\b",
+    r"\b(nadie me extrañaría|no aguanto más la vida|ya no puedo más con esta vida)\b",
+
+    # 5. Violencia o daño a terceros (Inglés / Español)
+    r"\b(kill them|kill him|kill her|shoot up|bomb|hurt someone|commit murder)\b",
+    r"\b(matarlo|matarlos|asesinar|disparar a|poner una bomba|hacer daño a alguien)\b"
+]
+
+def check_emergency(user_message: str) -> bool:
+    """Verifica si el mensaje contiene patrones de riesgo inminente."""
+    message_lower = user_message.lower()
+    for pattern in EMERGENCY_PATTERNS:
+        if re.search(pattern, message_lower):
+            return True
+    return False
+
+
 
 # ===============================
 # AUTENTICACIÓN
@@ -398,6 +441,38 @@ async def get_messages(conversation_id: str, current_user=Depends(get_current_us
 
 @app.post("/chat/stream")
 async def chat_stream(request: MessageRequest, current_user=Depends(get_current_user)):
+    user_id_str = str(current_user["_id"])
+    # 1. CAPA DE SEGURIDAD DETERMINISTA (CORTAFUEGOS)
+    if check_emergency(request.message):
+        emergency_msg = "I am an AI. This is a severe safety violation. You must contact emergency services immediately (911/112)."
+        
+        # Guardar el mensaje del usuario
+        messages_collection.insert_one({
+            "conversation_id": request.conversation_id,
+            "user_id": user_id_str,
+            "role": "user",
+            "content": request.message,
+            "timestamp": datetime.now(),
+            "rating": None,
+            "flagged_critical": True # Nuevo flag útil para el panel de admin
+        })
+        
+        # Guardar la respuesta bloqueada por el sistema
+        messages_collection.insert_one({
+            "conversation_id": request.conversation_id,
+            "user_id": user_id_str,
+            "role": "bot",
+            "content": emergency_msg,
+            "timestamp": datetime.now(),
+            "rating": None,
+            "system_override": True # Indica que no fue generado por Ollama
+        })
+        
+        # Simular el streaming para no romper la promesa del frontend
+        async def emergency_generator():
+            yield emergency_msg
+            
+        return StreamingResponse(emergency_generator(), media_type="text/plain")
     # Guardamos el mensaje del usuario
     messages_collection.insert_one({
         "conversation_id": request.conversation_id,
@@ -479,29 +554,82 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
 
     async def generator():
         accumulated = ""
+        client_disconnected = False
+        loop = asyncio.get_event_loop()
+        
         try:
-            # Usar ollama.chat en lugar de generate para mantener el contexto de chat
-            for chunk in ollama.chat(model=request.model, messages=mensajes_estructurados, stream=True):
-                content = chunk['message']['content']
-                accumulated += content
+            # Run ollama.chat in thread pool to avoid blocking the event loop
+            def get_ollama_stream():
+                return ollama.chat(model=request.model, messages=mensajes_estructurados, stream=True)
+            
+            # Execute ollama.chat in thread pool (non-blocking)
+            stream = await loop.run_in_executor(thread_pool, get_ollama_stream)
+            
+            try:
+                for chunk in stream:
+                    if client_disconnected:
+                        break
+                    
+                    try:
+                        content = chunk['message']['content']
+                        accumulated += content
+                        yield content
+                    except (BrokenPipeError, ConnectionResetError, RuntimeError) as e:
+                        # El cliente cerró la conexión, dejar de enviar
+                        client_disconnected = True
+                        logger.debug(f"Cliente desconectado durante envío: {type(e).__name__}")
+                        break
+                    except GeneratorExit:
+                        # El cliente cerró la conexión abruptamente
+                        client_disconnected = True
+                        logger.debug("GeneratorExit durante streaming")
+                        break
+                        
+            except GeneratorExit:
+                # El cliente cerró la conexión, salir gracefully
+                client_disconnected = True
+                logger.debug("GeneratorExit: cliente cerró la conexión")
+                pass
+            except (BrokenPipeError, ConnectionResetError, RuntimeError, OSError) as e:
+                # Errores de socket cuando el cliente se desconecta
+                client_disconnected = True
+                logger.debug(f"Error de socket durante generación: {type(e).__name__}")
+                pass
+            except Exception as e:
+                logger.error(f"Error inesperado durante streaming: {str(e)}")
+                # Si hay error, intentar guardar si es posible
+                if accumulated:
+                    try:
+                        messages_collection.insert_one({
+                            "conversation_id": request.conversation_id,
+                            "user_id": str(current_user["_id"]),
+                            "role": "bot",
+                            "content": accumulated,
+                            "timestamp": datetime.now(),
+                            "rating": None
+                        })
+                    except Exception as db_err:
+                        logger.error(f"Error guardando mensaje en BD: {str(db_err)}")
+                return
+            
+            # Guardamos la respuesta de la IA cuando termine normalmente (no por desconexión)
+            if accumulated and not client_disconnected:
                 try:
-                    yield content
-                except (BrokenPipeError, ConnectionResetError, RuntimeError) as e:
-                    # El cliente cerró la conexión, salir sin error
-                    logger.info(f"Cliente desconectado durante streaming: {type(e).__name__}")
-                    break
-        except GeneratorExit:
-            # El cliente cerró la conexión, salir gracefully
-            logger.info("GeneratorExit: cliente cerró la conexión")
-            pass
-        except (BrokenPipeError, ConnectionResetError, RuntimeError) as e:
-            # Errores de socket cuando el cliente se desconecta
-            logger.info(f"Error de socket durante generación: {type(e).__name__}")
-            pass
+                    messages_collection.insert_one({
+                        "conversation_id": request.conversation_id,
+                        "user_id": str(current_user["_id"]),
+                        "role": "bot",
+                        "content": accumulated,
+                        "timestamp": datetime.now(),
+                        "rating": None
+                    })
+                except Exception as e:
+                    logger.error(f"Error guardando respuesta en BD: {str(e)}")
+                    
         except Exception as e:
-            logger.error(f"Error inesperado durante streaming: {str(e)}")
-            # Si hay error, intentar actualizar si es posible
-            if accumulated:
+            # Catch-all for any unexpected errors at the generator level
+            logger.error(f"Error crítico en generator: {type(e).__name__}: {str(e)}")
+            if accumulated and not client_disconnected:
                 try:
                     messages_collection.insert_one({
                         "conversation_id": request.conversation_id,
@@ -513,21 +641,6 @@ async def chat_stream(request: MessageRequest, current_user=Depends(get_current_
                     })
                 except Exception as db_err:
                     logger.error(f"Error guardando mensaje en BD: {str(db_err)}")
-            return
-        
-        # Guardamos la respuesta de la IA cuando termine normalmente
-        if accumulated:
-            try:
-                messages_collection.insert_one({
-                    "conversation_id": request.conversation_id,
-                    "user_id": str(current_user["_id"]),
-                    "role": "bot",
-                    "content": accumulated,
-                    "timestamp": datetime.now(),
-                    "rating": None
-                })
-            except Exception as e:
-                logger.error(f"Error guardando respuesta en BD: {str(e)}")
 
     return StreamingResponse(generator(), media_type="text/plain")
 
