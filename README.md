@@ -7,6 +7,8 @@ Started" guide here: https://fresh.deno.dev/docs/getting-started
 
 Make sure to install Deno: https://deno.land/manual/getting_started/installation
 
+Folder with the GGUF files: https://drive.google.com/drive/folders/1ZY-5Kau8mxtuCA3v4sbRJX-K2HBSA2Kr?usp=drive_link
+
 Then start the project:
 
 ```
